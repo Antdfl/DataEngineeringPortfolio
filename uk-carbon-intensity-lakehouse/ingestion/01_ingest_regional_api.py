@@ -137,6 +137,10 @@ def count_half_hours(body):
     except (ValueError, KeyError, TypeError) as exc:
         raise ValueError(f"Unexpected response body: {exc!r}")
 
+def expected_half_hours(start, end):
+    """Half hours the API should return for [start, end): one per half hour, plus the one ending at start."""
+    return int((end - start).total_seconds() // 1800) + 1
+
 # COMMAND ----------
 
 # Widgets (they also work as Job parameters)
@@ -167,7 +171,9 @@ CREATE TABLE IF NOT EXISTS {LOG_TABLE} (
   file_name           STRING    COMMENT 'File written in the landing Volume, NULL if none',
   attempts            INT       COMMENT 'Attempts used for this call',
   elapsed_seconds     DOUBLE    COMMENT 'Total time including retries',
-  error               STRING    COMMENT 'Error text when the call failed'
+  error               STRING    COMMENT 'Error text when the call failed',
+  expected_half_hours INT       COMMENT 'Half hours the call should return: minutes of the window / 30 + 1',
+  is_complete         BOOLEAN   COMMENT 'true when n_half_hours equals expected_half_hours'
 )
 COMMENT 'One row per API call made by the ingestion notebook'
 """)
@@ -185,6 +191,8 @@ LOG_SCHEMA = T.StructType([
     T.StructField("attempts", T.IntegerType()),
     T.StructField("elapsed_seconds", T.DoubleType()),
     T.StructField("error", T.StringType()),
+    T.StructField("expected_half_hours", T.IntegerType()),
+    T.StructField("is_complete", T.BooleanType()),
 ])
 
 
@@ -222,10 +230,13 @@ def ingest_window(start, end):
                 f.write(result["body"])           # the response as received, no re-serialisation
 
     ok = result["status"] == 200 and error is None
+    expected = expected_half_hours(start, end)
+    complete = n_half_hours == expected
     write_log((
         str(uuid.uuid4()), downloaded_at, MODE, iso_z(start), iso_z(end), result["url"],
         result["status"], n_half_hours, file_name, result["attempts"],
         round(time.time() - started, 2), None if ok else error,
+        expected, complete,
     ))
     time.sleep(PAUSE_SECONDS)
 
@@ -234,6 +245,8 @@ def ingest_window(start, end):
         raise RuntimeError(f"Ingestion stopped. Window {label}: HTTP {result['status']}, error {error}. "
                            f"See {LOG_TABLE}.")
     note = "  (HTTP 200 with zero rows, nothing to load)" if n_half_hours == 0 else ""
+    if not complete:
+        note += f"  INCOMPLETE: expected {expected} half hours"
     print(f"OK  {label}: {n_half_hours} half hours, {result['attempts']} attempt(s), file {file_name}{note}")
 
 # COMMAND ----------
