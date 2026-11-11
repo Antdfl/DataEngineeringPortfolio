@@ -153,6 +153,10 @@ dbutils.widgets.dropdown("skip_done", "true", ["true", "false"], "Backfill: skip
 
 MODE = dbutils.widgets.get("mode")
 SKIP_DONE = dbutils.widgets.get("skip_done") == "true"
+START_DATE = parse_day(dbutils.widgets.get("start_date"))
+END_DATE = parse_day(dbutils.widgets.get("end_date"))
+BLOCK_DAYS = int(dbutils.widgets.get("block_days"))
+LOOKBACK_HOURS = int(dbutils.widgets.get("lookback_hours"))
 
 # COMMAND ----------
 
@@ -254,11 +258,11 @@ def ingest_window(start, end):
 # Run
 
 if MODE == "backfill":
-    start, end = parse_day(dbutils.widgets.get("start_date")), parse_day(dbutils.widgets.get("end_date"))
+    start, end = START_DATE, END_DATE
     if start >= end:
         raise ValueError("start_date must be before end_date")
     done = already_downloaded() if SKIP_DONE else set()
-    windows = list(day_blocks(start, end, int(dbutils.widgets.get("block_days"))))
+    windows = list(day_blocks(start, end, BLOCK_DAYS))
     print(f"Backfill: {len(windows)} windows, {len(done)} windows already logged as downloaded")
     for w_start, w_end in windows:
         if (iso_z(w_start), iso_z(w_end)) in done:
@@ -266,7 +270,7 @@ if MODE == "backfill":
             continue
         ingest_window(w_start, w_end)
 else:
-    lookback = int(dbutils.widgets.get("lookback_hours"))
+    lookback = LOOKBACK_HOURS
     if not 1 <= lookback <= MAX_LOOKBACK_HOURS:
         raise ValueError(f"lookback_hours must be between 1 and {MAX_LOOKBACK_HOURS}")
     w_start, w_end = update_window(datetime.now(timezone.utc), lookback)
