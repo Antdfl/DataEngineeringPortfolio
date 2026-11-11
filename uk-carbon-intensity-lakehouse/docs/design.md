@@ -1,6 +1,6 @@
 # UK Carbon Intensity Lakehouse: design document
 
-Status: draft, section 1 of N. Last updated: 2026-11-07.
+Status: draft, section 1 of N. Last updated: 2026-11-11.
 
 ## 1. Data source
 
@@ -29,7 +29,7 @@ This is a portfolio project with no commercial use. Nothing in this section is l
 
 ### 1.3 Measured behaviour
 
-The following behaviour was measured from a Databricks Free Edition notebook on 2026-10-24 and 2026-11-07. Where the documentation is silent or different, the measured behaviour wins.
+The following behaviour was measured from a Databricks Free Edition notebook on 2026-10-24, 2026-11-07 and 2026-11-08. Where the documentation is silent or different, the measured behaviour wins.
 
 | Aspect | Documentation | Measured |
 |---|---|---|
@@ -43,7 +43,9 @@ The following behaviour was measured from a Databricks Free Edition notebook on 
 | Regions per half hour | not stated | 18 (ids 1 to 18) |
 | Fuels per region and half hour | not stated | 9, always present, also when 0 |
 | Sum of the generation mix | not stated | Between 99.8 and 100.1 on the day checked (rounding) |
-| Regional data | flagged as beta | Consistent on the day checked |
+| Regional data | flagged as beta | Consistent on the day checked; the 24-month backfill showed the two anomalies below |
+| Multi-day range crossing 31 December | not stated | The response ends with the half hour starting at 23:00 UTC on 31 December; the rest of the range is missing. Seen at the end of 2024 and of 2025, for all regions. One-day ranges return the missing data. Cause unknown |
+| Gaps in the source | not stated | Two gaps, identical for all regions and for any range length: 17 half hours starting from 2025-01-12T23:00Z to 2025-01-13T07:00Z, and 8 half hours starting from 2025-08-10T23:00Z to 2025-08-11T02:30Z. Not recoverable as of 2026-11-08 |
 
 Response size and time for the endpoint without `regionid` (2026-11-07):
 
@@ -65,9 +67,11 @@ Response size and time for the endpoint without `regionid` (2026-11-07):
 | Measured fact | Design decision |
 |---|---|
 | Endpoint without `regionid` returns all regions in one call | One call per time block instead of 14 |
-| 14-day limit on that endpoint | Backfill in **7-day blocks**, from 00:00 UTC to 00:00 UTC: half the limit as safety margin, and readable file names. About 105 calls for 2 years |
+| 14-day limit on that endpoint | Backfill in **7-day blocks**, from 00:00 UTC to 00:00 UTC: half the limit as safety margin, and readable file names. 106 calls for the 24-month backfill |
 | One extra half hour at the start of every response | The half hour at each block boundary arrives twice. Deduplication on the key (region, half-hour start) in the silver layer |
 | Ids 15 to 18 are aggregates | Silver keeps only ids 1 to 14 (blocking data quality rule) |
 | HTTP 200 with zero rows is possible | The ingestion log records the number of half hours received for every call |
 | Rate limit not published | Pause between calls; retries with exponential backoff on 429 and 5xx; HTTP 400 stops the task without retries |
 | API may change without notice | The raw response is stored unchanged, so the silver layer can be rebuilt without calling the API again |
+| Multi-day ranges lose data after 23:00 UTC on 31 December | The days around each year end are downloaded again with one-day ranges (14 extra files in the backfill). The 7-day files are kept as a record; the overlap is removed by the silver deduplication |
+| Two gaps in the source (25 half hours per region) | Documented as a known limitation. The completeness rule (48 half hours per region and UTC day) is a warning, not a blocking rule |
