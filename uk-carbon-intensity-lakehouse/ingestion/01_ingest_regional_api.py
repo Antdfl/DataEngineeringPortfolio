@@ -32,6 +32,10 @@
 # MAGIC **Failure policy:** 429, 5xx and network errors are retried with growing waits; any other HTTP error (for example 400) is not retried.
 # MAGIC After a failed call the notebook stops with an error. Re-running it in `backfill` mode resumes from the first missing block.
 # MAGIC
+# MAGIC **Backfill guard:** before any call the notebook counts the windows still to download (after `skip_done`).
+# MAGIC If they are more than `max_windows` (default 30), it stops without calling the API.
+# MAGIC For an intended large backfill (for example from empty tables), raise `max_windows` on purpose.
+# MAGIC
 # MAGIC Data: Carbon Intensity API, National Energy System Operator (NESO), CC BY 4.0.
 
 # COMMAND ----------
@@ -150,6 +154,7 @@ dbutils.widgets.text("end_date", "2026-11-01", "Backfill end, excluded (YYYY-MM-
 dbutils.widgets.text("block_days", "7", "Backfill: days per call (max 13)")
 dbutils.widgets.text("lookback_hours", "6", "Update: hours to look back")
 dbutils.widgets.dropdown("skip_done", "true", ["true", "false"], "Backfill: skip blocks already downloaded")
+dbutils.widgets.text("max_windows", "30", "Backfill: max windows to download in one run")
 
 MODE = dbutils.widgets.get("mode")
 SKIP_DONE = dbutils.widgets.get("skip_done") == "true"
@@ -157,6 +162,7 @@ START_DATE = parse_day(dbutils.widgets.get("start_date"))
 END_DATE = parse_day(dbutils.widgets.get("end_date"))
 BLOCK_DAYS = int(dbutils.widgets.get("block_days"))
 LOOKBACK_HOURS = int(dbutils.widgets.get("lookback_hours"))
+MAX_WINDOWS = int(dbutils.widgets.get("max_windows"))
 
 # COMMAND ----------
 
@@ -263,7 +269,15 @@ if MODE == "backfill":
         raise ValueError("start_date must be before end_date")
     done = already_downloaded() if SKIP_DONE else set()
     windows = list(day_blocks(start, end, BLOCK_DAYS))
-    print(f"Backfill: {len(windows)} windows, {len(done)} windows already logged as downloaded")
+    to_download = [(s, e) for s, e in windows if (iso_z(s), iso_z(e)) not in done]
+    print(f"Backfill: {len(windows)} windows, {len(windows) - len(to_download)} already downloaded, "
+          f"{len(to_download)} to download (max_windows = {MAX_WINDOWS})")
+    if len(to_download) > MAX_WINDOWS:
+        raise RuntimeError(
+            f"Backfill stopped before any call: {len(to_download)} windows to download, more than "
+            f"max_windows = {MAX_WINDOWS}. Check start_date, end_date and block_days; "
+            f"if the run is intended, raise max_windows."
+        )
     for w_start, w_end in windows:
         if (iso_z(w_start), iso_z(w_end)) in done:
             print(f"SKIP {iso_z(w_start)} -> {iso_z(w_end)}: already downloaded")
