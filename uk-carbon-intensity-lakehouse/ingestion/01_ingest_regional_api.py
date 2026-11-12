@@ -32,6 +32,10 @@
 # MAGIC **Failure policy:** 429, 5xx and network errors are retried with growing waits; any other HTTP error (for example 400) is not retried.
 # MAGIC After a failed call the notebook stops with an error. Re-running it in `backfill` mode resumes from the first missing block.
 # MAGIC
+# MAGIC **Backfill guard:** before any call the notebook counts the windows still to download (after `skip_done`).
+# MAGIC If they are more than `max_windows` (default 30), it stops without calling the API.
+# MAGIC For an intended large backfill (for example from empty tables), raise `max_windows` on purpose.
+# MAGIC
 # MAGIC Data: Carbon Intensity API, National Energy System Operator (NESO), CC BY 4.0.
 
 # COMMAND ----------
@@ -137,6 +141,10 @@ def count_half_hours(body):
     except (ValueError, KeyError, TypeError) as exc:
         raise ValueError(f"Unexpected response body: {exc!r}")
 
+def expected_half_hours(start, end):
+    """Half hours the API should return for [start, end): one per half hour, plus the one ending at start."""
+    return int((end - start).total_seconds() // 1800) + 1
+
 # COMMAND ----------
 
 # Widgets (they also work as Job parameters)
@@ -146,9 +154,15 @@ dbutils.widgets.text("end_date", "2026-11-01", "Backfill end, excluded (YYYY-MM-
 dbutils.widgets.text("block_days", "7", "Backfill: days per call (max 13)")
 dbutils.widgets.text("lookback_hours", "6", "Update: hours to look back")
 dbutils.widgets.dropdown("skip_done", "true", ["true", "false"], "Backfill: skip blocks already downloaded")
+dbutils.widgets.text("max_windows", "30", "Backfill: max windows to download in one run")
 
 MODE = dbutils.widgets.get("mode")
 SKIP_DONE = dbutils.widgets.get("skip_done") == "true"
+START_DATE = parse_day(dbutils.widgets.get("start_date"))
+END_DATE = parse_day(dbutils.widgets.get("end_date"))
+BLOCK_DAYS = int(dbutils.widgets.get("block_days"))
+LOOKBACK_HOURS = int(dbutils.widgets.get("lookback_hours"))
+MAX_WINDOWS = int(dbutils.widgets.get("max_windows"))
 
 # COMMAND ----------
 
@@ -167,7 +181,9 @@ CREATE TABLE IF NOT EXISTS {LOG_TABLE} (
   file_name           STRING    COMMENT 'File written in the landing Volume, NULL if none',
   attempts            INT       COMMENT 'Attempts used for this call',
   elapsed_seconds     DOUBLE    COMMENT 'Total time including retries',
-  error               STRING    COMMENT 'Error text when the call failed'
+  error               STRING    COMMENT 'Error text when the call failed',
+  expected_half_hours INT       COMMENT 'Half hours the call should return: minutes of the window / 30 + 1',
+  is_complete         BOOLEAN   COMMENT 'true when n_half_hours equals expected_half_hours'
 )
 COMMENT 'One row per API call made by the ingestion notebook'
 """)
@@ -185,6 +201,8 @@ LOG_SCHEMA = T.StructType([
     T.StructField("attempts", T.IntegerType()),
     T.StructField("elapsed_seconds", T.DoubleType()),
     T.StructField("error", T.StringType()),
+    T.StructField("expected_half_hours", T.IntegerType()),
+    T.StructField("is_complete", T.BooleanType()),
 ])
 
 
@@ -222,10 +240,13 @@ def ingest_window(start, end):
                 f.write(result["body"])           # the response as received, no re-serialisation
 
     ok = result["status"] == 200 and error is None
+    expected = expected_half_hours(start, end)
+    complete = n_half_hours == expected
     write_log((
         str(uuid.uuid4()), downloaded_at, MODE, iso_z(start), iso_z(end), result["url"],
         result["status"], n_half_hours, file_name, result["attempts"],
         round(time.time() - started, 2), None if ok else error,
+        expected, complete,
     ))
     time.sleep(PAUSE_SECONDS)
 
@@ -234,6 +255,8 @@ def ingest_window(start, end):
         raise RuntimeError(f"Ingestion stopped. Window {label}: HTTP {result['status']}, error {error}. "
                            f"See {LOG_TABLE}.")
     note = "  (HTTP 200 with zero rows, nothing to load)" if n_half_hours == 0 else ""
+    if not complete:
+        note += f"  INCOMPLETE: expected {expected} half hours"
     print(f"OK  {label}: {n_half_hours} half hours, {result['attempts']} attempt(s), file {file_name}{note}")
 
 # COMMAND ----------
@@ -241,19 +264,27 @@ def ingest_window(start, end):
 # Run
 
 if MODE == "backfill":
-    start, end = parse_day(dbutils.widgets.get("start_date")), parse_day(dbutils.widgets.get("end_date"))
+    start, end = START_DATE, END_DATE
     if start >= end:
         raise ValueError("start_date must be before end_date")
     done = already_downloaded() if SKIP_DONE else set()
-    windows = list(day_blocks(start, end, int(dbutils.widgets.get("block_days"))))
-    print(f"Backfill: {len(windows)} windows, {len(done)} windows already logged as downloaded")
+    windows = list(day_blocks(start, end, BLOCK_DAYS))
+    to_download = [(s, e) for s, e in windows if (iso_z(s), iso_z(e)) not in done]
+    print(f"Backfill: {len(windows)} windows, {len(windows) - len(to_download)} already downloaded, "
+          f"{len(to_download)} to download (max_windows = {MAX_WINDOWS})")
+    if len(to_download) > MAX_WINDOWS:
+        raise RuntimeError(
+            f"Backfill stopped before any call: {len(to_download)} windows to download, more than "
+            f"max_windows = {MAX_WINDOWS}. Check start_date, end_date and block_days; "
+            f"if the run is intended, raise max_windows."
+        )
     for w_start, w_end in windows:
         if (iso_z(w_start), iso_z(w_end)) in done:
             print(f"SKIP {iso_z(w_start)} -> {iso_z(w_end)}: already downloaded")
             continue
         ingest_window(w_start, w_end)
 else:
-    lookback = int(dbutils.widgets.get("lookback_hours"))
+    lookback = LOOKBACK_HOURS
     if not 1 <= lookback <= MAX_LOOKBACK_HOURS:
         raise ValueError(f"lookback_hours must be between 1 and {MAX_LOOKBACK_HOURS}")
     w_start, w_end = update_window(datetime.now(timezone.utc), lookback)

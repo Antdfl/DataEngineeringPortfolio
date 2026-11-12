@@ -1,6 +1,6 @@
 # UK Carbon Intensity Lakehouse: design document
 
-Status: draft, section 1 of N. Last updated: 2026-11-11.
+Status: draft, section 1 of N. Last updated: 2026-11-12.
 
 ## 1. Data source
 
@@ -71,6 +71,7 @@ Response size and time for the endpoint without `regionid` (2026-11-07):
 | One extra half hour at the start of every response | The half hour at each block boundary arrives twice. Deduplication on the key (region, half-hour start) in the silver layer |
 | Ids 15 to 18 are aggregates | Silver keeps only ids 1 to 14 (blocking data quality rule) |
 | HTTP 200 with zero rows is possible | The ingestion log records the number of half hours received for every call |
+| A call can return fewer half hours than expected (year end, source gaps) | The ingestion log stores the expected half hours and a completeness flag for every call; incomplete calls are flagged, not blocked |
 | Rate limit not published | Pause between calls; retries with exponential backoff on 429 and 5xx; HTTP 400 stops the task without retries |
 | API may change without notice | The raw response is stored unchanged, so the silver layer can be rebuilt without calling the API again |
 | Multi-day ranges lose data after 23:00 UTC on 31 December | The days around each year end are downloaded again with one-day ranges (14 extra files in the backfill). The 7-day files are kept as a record; the overlap is removed by the silver deduplication |
