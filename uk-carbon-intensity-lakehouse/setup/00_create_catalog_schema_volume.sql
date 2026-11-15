@@ -8,7 +8,7 @@
 -- MAGIC | Object | Name | Purpose |
 -- MAGIC |---|---|---|
 -- MAGIC | Catalog | `portfolio` | Container for the portfolio projects |
--- MAGIC | Schema | `portfolio.uk_carbon` | Tables of the UK Carbon Intensity lakehouse (bronze, silver, gold) |
+-- MAGIC | Schema | `portfolio.uk_carbon` | Ingestion area: landing volume and ingestion log. Layer tables live in separate schemas (`02`) |
 -- MAGIC | Volume | `portfolio.uk_carbon.landing` | Raw JSON files written by the ingestion task, read by the pipeline |
 -- MAGIC
 -- MAGIC If `CREATE CATALOG` is not allowed in your workspace, use the default workspace catalog
@@ -22,7 +22,7 @@ COMMENT 'Data engineering portfolio projects';
 -- COMMAND ----------
 
 CREATE SCHEMA IF NOT EXISTS portfolio.uk_carbon
-COMMENT 'UK Carbon Intensity lakehouse: bronze, silver and gold tables';
+COMMENT 'UK Carbon Intensity: ingestion area (landing volume and ingestion log)';
 
 -- COMMAND ----------
 
