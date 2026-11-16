@@ -4,6 +4,8 @@ The bronze column `data` is parsed with an explicit schema (the contract with th
 exploded to one row per half hour and distribution region, and deduplicated with AUTO CDC
 on the key (region_id, period_start): the most recently written file wins.
 All timestamps stay in UTC.
+Data quality expectations run on the parsed rows, before AUTO CDC: four rules only warn,
+the rule on the key stops the update (a NULL key means the API contract has changed).
 """
 
 from pyspark import pipelines as dp
@@ -17,8 +19,17 @@ API_SCHEMA = (
 )
 API_TIME_FORMAT = "yyyy-MM-dd'T'HH:mmX"
 
+INTENSITY_WARNINGS = {
+    "forecast_not_null": "forecast_gco2_kwh IS NOT NULL",
+    "forecast_not_negative": "forecast_gco2_kwh >= 0",
+    "index_known": "intensity_index IN ('very low', 'low', 'moderate', 'high', 'very high')",
+    "half_hour_period": "period_end = period_start + INTERVAL 30 MINUTES",
+}
+
 
 @dp.view(comment="One row per half hour and distribution region (ids 1 to 14), duplicates included")
+@dp.expect_all(INTENSITY_WARNINGS)
+@dp.expect_or_fail("key_not_null", "period_start IS NOT NULL")
 def regional_half_hours():
     return (
         spark.readStream.table("uk_carbon_bronze.regional_raw")
