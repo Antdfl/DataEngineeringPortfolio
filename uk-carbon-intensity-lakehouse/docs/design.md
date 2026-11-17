@@ -1,6 +1,6 @@
 # UK Carbon Intensity Lakehouse: design document
 
-Status: draft, sections 1 to 5. Last updated: 2026-11-15.
+Status: draft, sections 1 to 6. Last updated: 2026-11-17.
 
 ## 1. Data source
 
@@ -42,7 +42,7 @@ The following behaviour was measured from a Databricks Free Edition notebook on 
 | Start of regional history | not stated | Between 2018-05-01 and 2018-06-01 |
 | Regions per half hour | not stated | 18 (ids 1 to 18) |
 | Fuels per region and half hour | not stated | 9, always present, also when 0 |
-| Sum of the generation mix | not stated | Between 99.8 and 100.1 on the day checked (rounding) |
+| Sum of the generation mix | not stated | Between 99.7 and 100.3 over the whole history (rounding), checked on 2026-11-16 |
 | Regional data | flagged as beta | Consistent on the day checked; the 24-month backfill showed the two anomalies below |
 | Multi-day range crossing 31 December | not stated | The response ends with the half hour starting at 23:00 UTC on 31 December; the rest of the range is missing. Seen at the end of 2024 and of 2025, for all regions. One-day ranges return the missing data. Cause unknown |
 | Gaps in the source | not stated | Two gaps, identical for all regions and for any range length: 17 half hours starting from 2025-01-12T23:00Z to 2025-01-13T07:00Z, and 8 half hours starting from 2025-08-10T23:00Z to 2025-08-11T02:30Z. Not recoverable as of 2026-11-08 |
@@ -61,6 +61,7 @@ Response size and time for the endpoint without `regionid` (2026-11-07):
 * Ids 1 to 14 are distribution network areas (for example 13 = London). Ids 15 to 18 are aggregates (England, Scotland, Wales, GB), like subtotal rows of a `GROUP BY ROLLUP`. **Only ids 1 to 14 are used**, so that regions are comparable and nothing is counted twice.
 * Regions are electricity distribution areas, not administrative boundaries.
 * The API does not provide regional electricity demand.
+* Each id had one name (`shortname`, `dnoregion`) over the whole history, checked on 2026-11-17. The operator names are not up to date: for example the API still uses `WPD`, although Western Power Distribution was renamed National Grid Electricity Distribution in September 2022.
 
 ### 1.5 Design consequences
 
@@ -69,13 +70,13 @@ Response size and time for the endpoint without `regionid` (2026-11-07):
 | Endpoint without `regionid` returns all regions in one call | One call per time block instead of 14 |
 | 14-day limit on that endpoint | Backfill in **7-day blocks**, from 00:00 UTC to 00:00 UTC: half the limit as safety margin, and readable file names. 106 calls for the 24-month backfill |
 | One extra half hour at the start of every response | The half hour at each block boundary arrives twice. Deduplication on the key (region, half-hour start) in the silver layer |
-| Ids 15 to 18 are aggregates | Silver keeps only ids 1 to 14 (blocking data quality rule) |
+| Ids 15 to 18 are aggregates | Silver keeps only ids 1 to 14: a project filter in the parsing function, not a data quality rule (see 4.3) |
 | HTTP 200 with zero rows is possible | The ingestion log records the number of half hours received for every call |
 | A call can return fewer half hours than expected (year end, source gaps) | The ingestion log stores the expected half hours and a completeness flag for every call; incomplete calls are flagged, not blocked |
 | Rate limit not published | Pause between calls; retries with exponential backoff on 429 and 5xx; HTTP 400 stops the task without retries |
 | API may change without notice | The raw response is stored unchanged, so the silver layer can be rebuilt without calling the API again |
 | Multi-day ranges lose data after 23:00 UTC on 31 December | The days around each year end are downloaded again with one-day ranges (14 extra files in the backfill). The 7-day files are kept as a record; the overlap is removed by the silver deduplication |
-| Two gaps in the source (25 half hours per region) | Documented as a known limitation. The completeness rule (48 half hours per region and UTC day) is a warning, not a blocking rule |
+| Two gaps in the source (25 half hours per region) | Documented as a known limitation. The completeness check (48 half hours per region and UTC day) is a query run after the pipeline, not a blocking rule (see 4.5) |
 
 ## 2. Architecture
 
@@ -131,7 +132,84 @@ Streaming table defined in `pipeline/transformations/01_bronze.py`, read from th
 
 Checked on 2026-11-14 and 2026-11-15 with SQL queries: bronze rows equal to the files in the ingestion log, the four columns above, no rescued data, and the number of half hours equal to the log file by file (`json_array_length(data)` against `n_half_hours`). A second run with no new files wrote no records.
 
-## 4. Pipeline `uk_carbon_pipeline`
+## 4. Silver layer
+
+### 4.1 Tables
+
+Defined in `pipeline/transformations/02_silver.py`. One table per grain, all in `portfolio.uk_carbon_silver`; all timestamps stay in UTC.
+
+| Table | Grain | Key | Other columns | Rows on 2026-11-17 |
+|---|---|---|---|---|
+| `intensity` | Region and half hour | `region_id`, `period_start` | `period_end`, `forecast_gco2_kwh`, `intensity_index`, `source_file`, `ingested_at` | 501,452 |
+| `generation_mix` | Region, half hour and fuel | `region_id`, `period_start`, `fuel` | `percentage`, `source_file`, `ingested_at` | 4,513,068 |
+| `regions` | Region | `region_id` | `short_name`, `dno_region`, `source_file`, `ingested_at` | 14 |
+
+`source_file` and `ingested_at` record the landing file that each row comes from.
+
+### 4.2 Data flow
+
+```
+uk_carbon_bronze.regional_raw
+        |
+        v
+parse_regional_half_hours()     Python function, not a dataset
+        |
+        +--> view regional_half_hours (5 rules) --AUTO CDC--> intensity
+        +--> view regional_fuel_mix   (4 rules) --AUTO CDC--> generation_mix
+        +--> view regional_names      (3 rules) --AUTO CDC--> regions
+```
+
+The function parses the JSON text with an explicit schema, explodes it to one row per half hour and region, keeps ids 1 to 14 and converts the timestamps. It returns the region struct `r` unchanged, so each view selects only the columns of its own grain; the mix view explodes one more level, the fuels. In SQL terms: one common table expression and three `SELECT` statements. Because the function is code and not a dataset, it does not appear in the pipeline graph: each view runs it on its own stream, with its own checkpoint.
+
+### 4.3 Design decisions
+
+| Decision | Reason |
+|---|---|
+| `from_json` with a schema written in the code | The schema is the contract with the API, kept in one place. `from_json` does not fail on a wrong type: the field becomes NULL, and the expectations count it |
+| Ids 1 to 14 kept by a filter in the parsing function | A project choice (see 1.4), not a data quality rule: the rows of ids 15 to 18 are correct, they are just not used |
+| One table per grain | Each fact is stored once, at its own level of detail; the gold layer joins the tables |
+| AUTO CDC, SCD type 1, `sequence_by` = `ingested_at` | A declarative `MERGE`: the most recently written file wins, also when an older file is processed later. Before merging, AUTO CDC keeps one row per key, so the duplicates from overlapping files do not make the merge fail |
+| `regions`: `sequence_by` = `struct(ingested_at, period_start)` | In one file a region appears once per half hour, always with the same `ingested_at`: a tie. AUTO CDC needs one sequencing value per key, so `period_start` breaks the tie. It is used for ordering only and is not stored |
+| `regions` as SCD type 1 | The dashboard needs the current names, and the names never changed in the history (see 1.4). SCD type 2 would keep the history of names if they started to change |
+| Expectations on the views, before AUTO CDC | The rules run where NULLs are created (`from_json`, `to_timestamp`), and a NULL key is stopped before the merge. They count the rows arriving from the view, duplicates included |
+
+### 4.4 Data quality rules (expectations)
+
+Rules that only warn keep the row and count it in the pipeline event log. Rules that fail stop the update: a NULL key or sequence means that the API contract has changed, and the job failure email is the alarm.
+
+| View | Rule | Condition | Action |
+|---|---|---|---|
+| `regional_half_hours` | `forecast_not_null` | `forecast_gco2_kwh IS NOT NULL` | Warn |
+| | `forecast_not_negative` | `forecast_gco2_kwh >= 0` (0 occurs) | Warn |
+| | `index_known` | `intensity_index` in the five known values | Warn |
+| | `half_hour_period` | `period_end = period_start + INTERVAL 30 MINUTES` | Warn |
+| | `key_not_null` | `period_start IS NOT NULL` | Fail |
+| `regional_fuel_mix` | `percentage_not_null` | `percentage IS NOT NULL` | Warn |
+| | `percentage_in_range` | `percentage BETWEEN 0 AND 100` (0 and 100 occur) | Warn |
+| | `fuel_known` | `fuel` in the nine known fuels | Warn |
+| | `key_not_null` | `period_start IS NOT NULL AND fuel IS NOT NULL` | Fail |
+| `regional_names` | `dno_region_not_null` | `dno_region IS NOT NULL` | Warn |
+| | `short_name_not_null` | `short_name IS NOT NULL` | Warn |
+| | `sequence_not_null` | `period_start IS NOT NULL` | Fail |
+
+On the whole history no rule was violated: 512,218 rows checked for `intensity` and 4,609,962 for the mix on 2026-11-16, 513,576 for the names on 2026-11-17.
+
+### 4.5 Aggregate checks
+
+An expectation looks at one row at a time. Rules on groups of rows are SQL queries, run after the pipeline:
+
+| Check | Expected | Result on 2026-11-17 |
+|---|---|---|
+| Unique keys | Rows equal to distinct keys | True for the three tables |
+| Completeness: 48 half hours per region and UTC day | Only known exceptions | Six days: the first day (2024-10-31, 1 half hour), the two source gaps (see 1.3; 2025-01-12 and 13: 46 and 33; 2025-08-10 and 11: 46 and 42) and the current day |
+| Generation mix: 9 fuels per region and half hour | `generation_mix` rows = 9 x `intensity` rows | 4,513,068 = 9 x 501,452 |
+| Sum of the generation mix per region and half hour | 100 +/- 0.5 | No value outside; from 99.7 to 100.3 |
+
+### 4.6 Incremental processing
+
+A daily run reads only the new landing file. The Delta history of `intensity` after the run of 2026-11-17 shows a `MERGE` with 1,358 source rows (97 half hours x 14 regions), 672 rows inserted (48 new half hours), 686 updated (the 49 half hours already present) and 0 deleted. A full refresh of the same table reads the whole bronze table again: on 2026-11-16 its `MERGE` received 500,780 rows, one per key after deduplication, and inserted all of them.
+
+## 5. Pipeline `uk_carbon_pipeline`
 
 The pipeline settings live in the workspace, not in the repository. They are recorded here so that the project can be rebuilt. Databricks Asset Bundles are a possible future step.
 
@@ -145,18 +223,18 @@ The pipeline settings live in the workspace, not in the repository. They are rec
 | Source code | The folder `transformations/` |
 | Default catalog and schema | `portfolio`, `uk_carbon_bronze` |
 
-Source files are plain Python or SQL files, not notebooks. They are numbered (`01_bronze.py`, then silver and gold) for readers; the execution order is decided by the pipeline graph.
+Source files are plain Python or SQL files, not notebooks. They are numbered (`01_bronze.py`, `02_silver.py`, then gold) for readers; the execution order is decided by the pipeline graph.
 
-## 5. Orchestration: job `uk_carbon_refresh`
+## 6. Orchestration: job `uk_carbon_refresh`
 
-### 5.1 Tasks
+### 6.1 Tasks
 
 | Task | Type | Settings | Retries |
 |---|---|---|---|
 | `ingest_update` | Notebook `ingestion/01_ingest_regional_api` from the Git folder, serverless | Parameters `mode` = `update`, `lookback_hours` = `48` | 2 retries (3 attempts in total), 10 minutes apart; serverless auto-optimization disabled |
 | `refresh_pipeline` | Pipeline `uk_carbon_pipeline`, no full refresh | Depends on `ingest_update`; runs only if it succeeded | 1 retry (2 attempts in total), 5 minutes apart |
 
-### 5.2 Job settings
+### 6.2 Job settings
 
 | Setting | Value | Reason |
 |---|---|---|
@@ -166,9 +244,10 @@ Source files are plain Python or SQL files, not notebooks. They are numbered (`0
 | Maximum concurrent runs | 1, with queueing on | A second run waits for the first one instead of overlapping |
 | Performance optimized | Off (standard mode) | Lower cost; the slower start (4 to 6 minutes according to the documentation) is acceptable for a daily run |
 
-### 5.3 Behaviour and measurements
+### 6.3 Behaviour and measurements
 
 * If the ingestion fails, the notebook writes the error to the ingestion log before failing, the pipeline task does not start and the bronze table does not change. The next run recovers the missing period thanks to the 48-hour window.
-* Measured on 2026-11-15 in performance optimized mode: a run takes between 1.3 and 1.7 minutes. The Spark work (writing the log and refreshing the bronze table) takes less than 20 seconds; most of the rest is compute start and orchestration. Measurements in standard mode will follow.
+* Measured on 2026-11-15 in performance optimized mode: a run takes between 1.3 and 1.7 minutes. The Spark work (writing the log and refreshing the bronze table) takes less than 20 seconds; most of the rest is compute start and orchestration.
+* Measured in standard mode, on the scheduled runs of 2026-11-16 and 2026-11-17: a run takes between 8.4 and 10.4 minutes. The API call takes about 4 seconds; most of the rest is compute start for the two tasks.
 * When a second run is queued, the waiting time is included in the duration of its first task.
 * Known limitation: the job runs the code of the branch currently checked out in the Git folder. While the schedule is active, the Git folder must stay on a tested branch.
