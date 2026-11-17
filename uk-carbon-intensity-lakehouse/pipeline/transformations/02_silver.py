@@ -4,9 +4,10 @@ The bronze column `data` is parsed with an explicit schema (the contract with th
 exploded to one row per half hour and distribution region, and deduplicated with AUTO CDC:
 the most recently written file wins. One table per grain:
 - intensity: one row per region and half hour, key (region_id, period_start);
-- generation_mix: one row per region, half hour and fuel, key (region_id, period_start, fuel).
+- generation_mix: one row per region, half hour and fuel, key (region_id, period_start, fuel);
+- regions: one row per region with the names from the API, key region_id.
 All timestamps stay in UTC.
-The parsing lives in one function shared by the two views.
+The parsing lives in one function shared by the three views.
 Data quality expectations run on the views, before AUTO CDC: the rules on values only warn,
 the rule on the key stops the update (a NULL key means the API contract has changed).
 """
@@ -36,6 +37,11 @@ MIX_WARNINGS = {
         "fuel IN ('biomass', 'coal', 'gas', 'hydro', 'imports', "
         "'nuclear', 'other', 'solar', 'wind')"
     ),
+}
+
+REGION_WARNINGS = {
+    "dno_region_not_null": "dno_region IS NOT NULL",
+    "short_name_not_null": "short_name IS NOT NULL",
 }
 
 
@@ -100,6 +106,20 @@ def regional_fuel_mix():
     )
 
 
+@dp.view(comment="One row per half hour and distribution region with the region names, duplicates included")
+@dp.expect_all(REGION_WARNINGS)
+@dp.expect_or_fail("sequence_not_null", "period_start IS NOT NULL")
+def regional_names():
+    return parse_regional_half_hours().select(
+        "region_id",
+        F.col("r.shortname").alias("short_name"),
+        F.col("r.dnoregion").alias("dno_region"),
+        "period_start",
+        "source_file",
+        "ingested_at",
+    )
+
+
 dp.create_streaming_table(
     name="uk_carbon_silver.intensity",
     comment="Carbon intensity forecast, one row per region and half hour (UTC); the latest file wins",
@@ -123,5 +143,20 @@ dp.create_auto_cdc_flow(
     source="regional_fuel_mix",
     keys=["region_id", "period_start", "fuel"],
     sequence_by="ingested_at",
+    stored_as_scd_type=1,
+)
+
+dp.create_streaming_table(
+    name="uk_carbon_silver.regions",
+    comment="Distribution regions 1 to 14 with the names from the API; the latest file wins",
+)
+
+# The same region appears 97 times in one file with the same ingested_at: period_start breaks the tie.
+dp.create_auto_cdc_flow(
+    target="uk_carbon_silver.regions",
+    source="regional_names",
+    keys=["region_id"],
+    sequence_by=F.struct("ingested_at", "period_start"),
+    except_column_list=["period_start"],
     stored_as_scd_type=1,
 )
