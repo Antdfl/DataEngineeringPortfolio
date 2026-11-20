@@ -1,6 +1,6 @@
 # UK Carbon Intensity Lakehouse: design document
 
-Status: draft, sections 1 to 6. Last updated: 2026-11-17.
+Status: draft, sections 1 to 7. Last updated: 2026-11-20.
 
 ## 1. Data source
 
@@ -89,7 +89,7 @@ The project uses one Unity Catalog schema per layer, all in the `portfolio` cata
 | `portfolio.uk_carbon` | Ingestion | Landing volume (raw API responses as JSON files) and ingestion log |
 | `portfolio.uk_carbon_bronze` | Bronze | Raw API responses read by Auto Loader, all fields as strings |
 | `portfolio.uk_carbon_silver` | Silver | Typed, filtered and deduplicated tables |
-| `portfolio.uk_carbon_gold` | Gold | Materialized views and metric view for the dashboard |
+| `portfolio.uk_carbon_gold` | Gold | Materialized views built by the pipeline and metric views for the dashboard (see 5) |
 
 Table names do not repeat the layer, because the schema already says it (for example `uk_carbon_bronze.regional_raw`). Code always uses `schema.table`, also for the default schema of the pipeline.
 
@@ -209,7 +209,108 @@ An expectation looks at one row at a time. Rules on groups of rows are SQL queri
 
 A daily run reads only the new landing file. The Delta history of `intensity` after the run of 2026-11-17 shows a `MERGE` with 1,358 source rows (97 half hours x 14 regions), 672 rows inserted (48 new half hours), 686 updated (the 49 half hours already present) and 0 deleted. A full refresh of the same table reads the whole bronze table again: on 2026-11-16 its `MERGE` received 500,780 rows, one per key after deduplication, and inserted all of them.
 
-## 5. Pipeline `uk_carbon_pipeline`
+## 5. Gold layer
+
+### 5.1 Approach
+
+The gold layer has two parts:
+
+* **Materialized views** in the pipeline (`pipeline/transformations/03_gold.sql`): wide tables at the same fine grain as the silver tables, with the joins, labels and calendar columns that the dashboard needs. They store no averages.
+* **Metric views** on top of them (next step): they hold the measures (the formulas), and whoever queries them chooses the grouping. The dashboard and Genie will read the same formulas.
+
+| Option | Outcome | Reason |
+|---|---|---|
+| Metric views directly on the silver tables | Rejected | No gold layer in the medallion design; all the logic would live in YAML |
+| **Fine-grained materialized views, with metric views on top** | **Chosen** | One orchestration (same pipeline, same job), plain SQL, one set of formulas for every consumer |
+| The same, with materialized metric views | Rejected | Experimental feature, no gain at about 0.5 and 4.5 million rows. A possible future step |
+| Pre-aggregated gold tables, no metric views | Rejected | Rigid, and an average of averages is wrong when the groups have different sizes |
+| Tables written by a notebook | Rejected | More code, and the gold layer would be outside the pipeline graph |
+
+### 5.2 Materialized views
+
+All in `portfolio.uk_carbon_gold`, defined in `pipeline/transformations/03_gold.sql`.
+
+| View | Grain | Sources | Rows checked on 2026-11-20 |
+|---|---|---|---|
+| `mv_intensity_half_hour` | Region and half hour | `intensity`, `regions` | 502,796 |
+| `mv_fuel_mix_half_hour` | Region, half hour and fuel | `generation_mix`, `regions` | 4,525,164 |
+
+Columns shared by the two views:
+
+| Column | Type | Content |
+|---|---|---|
+| `region_id` | INT | Region id (1 to 14) |
+| `region_name` | STRING | `short_name` from `regions`, for example London |
+| `period_start_utc` | TIMESTAMP | Start of the half hour, an instant (UTC) |
+| `period_start_uk` | TIMESTAMP_NTZ | The same start as shown by a clock in London |
+| `date_uk` | DATE | London date: days are cut at London midnight |
+| `hour_uk` | INT | London hour, 0 to 23 |
+| `day_of_week_uk` | INT | ISO day of the week, Monday 1 to Sunday 7: sorts the days |
+| `day_name_uk` | STRING | `Mon` to `Sun`: labels the days |
+
+Columns of each view:
+
+| View | Columns |
+|---|---|
+| `mv_intensity_half_hour` | `forecast_gco2_kwh`, `intensity_index` |
+| `mv_fuel_mix_half_hour` | `fuel`, `fuel_group` (see 5.4), `percentage` |
+
+Not copied from the silver tables: `period_end` (always `period_start` plus 30 minutes), `source_file` and `ingested_at` (lineage, kept in silver), `dno_region` (operator names, partly out of date, see 1.4).
+
+### 5.3 Design decisions
+
+| Decision | Reason |
+|---|---|
+| Names: `mv_` for materialized views, `metrics_` for metric views | The type of each object is visible in its name |
+| London clock time next to UTC | The data describe the British grid and British habits. In UTC the evening peak would move by one hour between summer and winter. Rule: store in UTC, present in the time zone of the people who use the data |
+| `convert_timezone('Europe/London', period_start)`, two arguments | With two arguments the source time zone is the session one, so the result is right with any session time zone (tested with a session in Europe/Rome). The three-argument form with `'UTC'` is right only when the session is in UTC |
+| Day of the week as a number and a name | A name alone sorts alphabetically (Fri, Mon, Sat, ...) |
+| `LEFT JOIN` with `regions` plus an expectation | An inner join would drop rows without a name silently; here the row stays and the event log counts it |
+| `TBLPROPERTIES ('delta.feature.timestampNtz' = 'supported')` in the definition | Delta tables declare the features they use, and `TIMESTAMP_NTZ` must be enabled explicitly: the first run failed with `DELTA_FEATURES_REQUIRE_MANUAL_ENABLEMENT`. The property is in the code, not set with a manual `ALTER TABLE`, because the pipeline runs the definition again at every update and only the code in the repository survives a rebuild |
+| Two views, one per grain | Intensity and mix are master and detail. Joining them would repeat each forecast for the nine fuels, and a sum of the forecast would be nine times too large (fan-out). The views meet in the dashboard through their common columns: region, date and hour |
+
+### 5.4 Fuel groups
+
+The nine fuels of the API are grouped into three groups, to keep the generation mix readable in a chart. The groups answer the question "does the source replenish itself?", not "how much CO2 does it emit?": CO2 is already measured by `forecast_gco2_kwh` in `mv_intensity_half_hour`.
+
+| `fuel_group` | Fuels | Note |
+|---|---|---|
+| `Renewable` | wind, solar, hydro, biomass | Biomass is counted as renewable, as in NESO's annual review, because the trees are replanted and grow again. It is not zero carbon: the API uses a factor of 120 gCO2/kWh for it |
+| `Fossil` | gas, coal | |
+| `Nuclear and other` | nuclear, imports, other | Nuclear emits no CO2 while generating (factor 0 in the API) but is not renewable. Imports have a variable carbon intensity, calculated from the generation mix of the exporting country |
+
+The `CASE` that sets the group has no `ELSE`: a fuel added by the API would get a NULL group, and the `fuel_group_known` expectation would show it in the event log.
+
+### 5.5 Data quality rules (expectations)
+
+All the gold rules only warn: the row is kept and counted in the event log.
+
+| View | Rule | Condition |
+|---|---|---|
+| `mv_intensity_half_hour` | `region_name_known` | `region_name IS NOT NULL` |
+| `mv_fuel_mix_half_hour` | `region_name_known` | `region_name IS NOT NULL` |
+| | `fuel_group_known` | `fuel_group IS NOT NULL` |
+
+No rule was violated on the first runs (2026-11-19 and 2026-11-20).
+
+### 5.6 Checks
+
+| Check | Expected | Result |
+|---|---|---|
+| Rows and keys | Rows equal to the distinct keys and to the rows of the silver source | 502,796 and 4,525,164: true for both views |
+| Region names | 14 names, no NULL | True for both views |
+| London days with a clock change (`mv_intensity_half_hour`) | 46 half hours per region on the last Sunday of March, 50 on the last Sunday of October, 48 on a normal day | 2025-03-30: 46, 2025-10-26: 50, 2026-03-29: 46, 2026-10-25: 50, 2026-11-18: 48 |
+| London rows with `hour_uk` = 1 | 2 on a normal day, 4 on 2026-10-25, none on 2026-03-29 | As expected |
+| Fuel groups | Each fuel in one group; rows = 502,796 x the fuels of the group | Fossil 1,005,592; Nuclear and other 1,508,388; Renewable 2,011,184 |
+| Sum of the generation mix per region and half hour | 100 +/- 0.5 | No value outside; from 99.7 to 100.3 |
+
+The clock-change days are the proof that the gold layer cuts days in London time: in UTC every day has 48 half hours (see 4.5).
+
+### 5.7 Refresh
+
+A materialized view added to the pipeline does not need a full refresh: the first normal run computes it completely ("Full recompute" on the pipeline page). On 2026-11-20 a run with no new data showed "No change" for `mv_intensity_half_hour`: the sources had not changed, so nothing was recomputed. Whether the views are refreshed incrementally when new data arrives has not been checked yet.
+
+## 6. Pipeline `uk_carbon_pipeline`
 
 The pipeline settings live in the workspace, not in the repository. They are recorded here so that the project can be rebuilt. Databricks Asset Bundles are a possible future step.
 
@@ -223,18 +324,18 @@ The pipeline settings live in the workspace, not in the repository. They are rec
 | Source code | The folder `transformations/` |
 | Default catalog and schema | `portfolio`, `uk_carbon_bronze` |
 
-Source files are plain Python or SQL files, not notebooks. They are numbered (`01_bronze.py`, `02_silver.py`, then gold) for readers; the execution order is decided by the pipeline graph.
+Source files are plain Python or SQL files, not notebooks; the pipeline chooses the language from the file extension. They are numbered (01_bronze.py, 02_silver.py, 03_gold.sql) for readers; the execution order is decided by the pipeline graph.
 
-## 6. Orchestration: job `uk_carbon_refresh`
+## 7. Orchestration: job `uk_carbon_refresh`
 
-### 6.1 Tasks
+### 7.1 Tasks
 
 | Task | Type | Settings | Retries |
 |---|---|---|---|
 | `ingest_update` | Notebook `ingestion/01_ingest_regional_api` from the Git folder, serverless | Parameters `mode` = `update`, `lookback_hours` = `48` | 2 retries (3 attempts in total), 10 minutes apart; serverless auto-optimization disabled |
 | `refresh_pipeline` | Pipeline `uk_carbon_pipeline`, no full refresh | Depends on `ingest_update`; runs only if it succeeded | 1 retry (2 attempts in total), 5 minutes apart |
 
-### 6.2 Job settings
+### 7.2 Job settings
 
 | Setting | Value | Reason |
 |---|---|---|
@@ -244,7 +345,7 @@ Source files are plain Python or SQL files, not notebooks. They are numbered (`0
 | Maximum concurrent runs | 1, with queueing on | A second run waits for the first one instead of overlapping |
 | Performance optimized | Off (standard mode) | Lower cost; the slower start (4 to 6 minutes according to the documentation) is acceptable for a daily run |
 
-### 6.3 Behaviour and measurements
+### 7.3 Behaviour and measurements
 
 * If the ingestion fails, the notebook writes the error to the ingestion log before failing, the pipeline task does not start and the bronze table does not change. The next run recovers the missing period thanks to the 48-hour window.
 * Measured on 2026-11-15 in performance optimized mode: a run takes between 1.3 and 1.7 minutes. The Spark work (writing the log and refreshing the bronze table) takes less than 20 seconds; most of the rest is compute start and orchestration.
