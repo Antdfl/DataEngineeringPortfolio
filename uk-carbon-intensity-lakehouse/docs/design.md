@@ -324,7 +324,7 @@ The pipeline settings live in the workspace, not in the repository. They are rec
 | Source code | The folder `transformations/` |
 | Default catalog and schema | `portfolio`, `uk_carbon_bronze` |
 
-Source files are plain Python or SQL files, not notebooks; the pipeline chooses the language from the file extension. They are numbered (01_bronze.py, 02_silver.py, 03_gold.sql) for readers; the execution order is decided by the pipeline graph.
+Source files are plain Python or SQL files, not notebooks; the pipeline chooses the language from the file extension. They are numbered (`01_bronze.py`, `02_silver.py`, `03_gold.sql`) for readers; the execution order is decided by the pipeline graph.
 
 ## 7. Orchestration: job `uk_carbon_refresh`
 
