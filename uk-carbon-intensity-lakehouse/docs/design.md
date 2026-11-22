@@ -413,7 +413,6 @@ On 2026-11-21 the check cell of `metrics_generation_mix` in the setup notebook g
 ### 8.5 Not checked yet
 
 * The `display_name` labels in a dashboard and in Genie.
-* A metric view queried from a Job task.
 
 ## 9. Daily checks
 
@@ -440,8 +439,21 @@ The notebook `checks/01_daily_job_checks` runs one SQL query after the Job `uk_c
 | Metric views | 25 and 26 | `half_hours` of `metrics_carbon_intensity` equals the gold rows; `region_half_hours` of `metrics_generation_mix` equals the gold intensity rows |
 | Summary | 99 | Number of checks in `KO` |
 
-On the run of 2026-11-21 the checks returned `OK` and the summary 0 (25 checks at the time; check 26 was added the same evening and was `OK`).
+On the runs of 2026-11-21 and 2026-11-22 the checks returned `OK` and the summary 0 (on 2026-11-21 there were 25 checks; check 26 was added the same evening and was `OK`).
 
-### 9.3 Next step
+### 9.3 Failing the Job
 
-The notebook is run by hand. A check that depends on a person who remembers to run it is not a check. The planned step is a third task of the Job, after `refresh_pipeline`, that runs the notebook and fails when a check is `KO`: the run turns red and the failure email is sent. The way to make the task fail has not been tested yet.
+The notebook stores the query in the temporary view `daily_checks` and ends with a cell that calls `assert_true`. The cell returns NULL when every check is `OK`. It raises `USER_RAISED_EXCEPTION` (SQLSTATE `P0001`) with a message when at least one check is `KO`, or when the view is empty. In a Job task this makes the task fail. `assert_true` also fails on a NULL condition (checked on 2026-11-22), in line with the rule that a NULL is `KO`.
+
+Tested on 2026-11-22 in a test Job with one task that runs the notebook: serverless compute, failure email, no retries (a check in `KO` does not recover by trying again).
+
+| Case | Result |
+|---|---|
+| All checks `OK` | Run succeeded in 32 seconds |
+| Check 26 with `+ 1` in its condition | Run failed in 31 seconds: the first two cells passed, the `assert_true` cell failed with the message of the notebook, and the failure email arrived the same minute |
+
+The email is generic ("Task checks failed ... see run output for details"): the check in `KO` is read in the run output. The test also showed that the metric views read by checks 25 and 26 can be queried from a Job task.
+
+### 9.4 Next step
+
+The checks are not yet a task of `uk_carbon_refresh`: the notebook is run by hand. The planned step is a third task, after `refresh_pipeline`, with no retries, that runs this notebook, so that a `KO` turns the run red and sends the failure email. The Job runs the code of `main`, so the task can be configured only after the pull request is merged. A check that depends on a person who remembers to run it is not a check.
