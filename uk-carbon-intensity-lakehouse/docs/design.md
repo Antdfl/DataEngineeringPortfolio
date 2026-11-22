@@ -1,6 +1,6 @@
 # UK Carbon Intensity Lakehouse: design document
 
-Status: draft, sections 1 to 7. Last updated: 2026-11-20.
+Status: draft, sections 1 to 9. Last updated: 2026-11-22.
 
 ## 1. Data source
 
@@ -216,7 +216,7 @@ A daily run reads only the new landing file. The Delta history of `intensity` af
 The gold layer has two parts:
 
 * **Materialized views** in the pipeline (`pipeline/transformations/03_gold.sql`): wide tables at the same fine grain as the silver tables, with the joins, labels and calendar columns that the dashboard needs. They store no averages.
-* **Metric views** on top of them (next step): they hold the measures (the formulas), and whoever queries them chooses the grouping. The dashboard and Genie will read the same formulas.
+* **Metric views** on top of them (section 8): they hold the measures (the formulas), and whoever queries them chooses the grouping. Every consumer of a metric view gets the same formulas.
 
 | Option | Outcome | Reason |
 |---|---|---|
@@ -308,7 +308,7 @@ The clock-change days are the proof that the gold layer cuts days in London time
 
 ### 5.7 Refresh
 
-A materialized view added to the pipeline does not need a full refresh: the first normal run computes it completely ("Full recompute" on the pipeline page). On 2026-11-20 a run with no new data showed "No change" for `mv_intensity_half_hour`: the sources had not changed, so nothing was recomputed. Whether the views are refreshed incrementally when new data arrives has not been checked yet.
+A materialized view added to the pipeline does not need a full refresh: the first normal run computes it completely ("Full recompute" on the pipeline page). On 2026-11-20 a run with no new data showed "No change" for `mv_intensity_half_hour`: the sources had not changed, so nothing was recomputed. On the same day, a run with new data showed "Incremental" for the gold views. The number of rows recomputed by an incremental refresh has not been measured.
 
 ## 6. Pipeline `uk_carbon_pipeline`
 
@@ -352,3 +352,108 @@ Source files are plain Python or SQL files, not notebooks; the pipeline chooses 
 * Measured in standard mode, on the scheduled runs of 2026-11-16 and 2026-11-17: a run takes between 8.4 and 10.4 minutes. The API call takes about 4 seconds; most of the rest is compute start for the two tasks.
 * When a second run is queued, the waiting time is included in the duration of its first task.
 * Known limitation: the job runs the code of the branch currently checked out in the Git folder. While the schedule is active, the Git folder must stay on a tested branch.
+
+## 8. Metric views
+
+### 8.1 What a metric view is
+
+A metric view is a Unity Catalog object defined in YAML. It stores no data: it reads its source at query time. It declares **dimensions** (the columns to group by) and **measures** (the formulas). The `GROUP BY` is not written in the definition: whoever queries the view chooses it. Measures are read with `MEASURE()`, and `SELECT *` is not allowed. In Oracle terms it is close to an analytic view.
+
+The definitions use `version: 1.1`, supported by the Free Edition (checked on 2026-11-06). Each definition has a `source` (the `FROM`), `dimensions`, `measures` and a `comment`. A measure can use other measures with `MEASURE()`.
+
+### 8.2 The two metric views
+
+Both are in `portfolio.uk_carbon_gold` and are defined in `setup/03_create_metric_views`.
+
+| Metric view | Source | Dimensions | Measures |
+|---|---|---|---|
+| `metrics_carbon_intensity` | `mv_intensity_half_hour` | `region`, `date_uk`, `hour_uk`, `day_of_week`, `day_name`, `intensity_index` | `half_hours`, `total_intensity`, `avg_intensity`, `low_emission_half_hours`, `low_emission_share_pct` |
+| `metrics_generation_mix` | `mv_fuel_mix_half_hour` | `region`, `date_uk`, `hour_uk`, `day_of_week`, `day_name`, `fuel_group`, `fuel` | `region_half_hours`, `total_percentage`, `avg_share_pct` |
+
+| Measure | Formula |
+|---|---|
+| `half_hours` | `COUNT(1)` |
+| `total_intensity` | `SUM(forecast_gco2_kwh)` |
+| `avg_intensity` | `MEASURE(total_intensity) / MEASURE(half_hours)` |
+| `low_emission_half_hours` | `COUNT(1)` of the rows with `intensity_index` in `very low`, `low` |
+| `low_emission_share_pct` | `MEASURE(low_emission_half_hours) / MEASURE(half_hours) * 100` |
+| `region_half_hours` | `COUNT(DISTINCT region_id, period_start_utc)` |
+| `total_percentage` | `SUM(percentage)` |
+| `avg_share_pct` | `MEASURE(total_percentage) / MEASURE(region_half_hours)` |
+
+### 8.3 Design decisions
+
+| Decision | Reason |
+|---|---|
+| Created by a setup notebook, not by the pipeline | A metric view contains no data, so there is nothing to refresh: it is created once, like a `CREATE VIEW` in a deployment script. The pipeline also refuses the statement: `CREATE VIEW ... WITH METRICS` inside the pipeline failed on 2026-11-20 with SQL state `0A000`. Every statement is `CREATE OR REPLACE`, so the notebook can be run again safely. Run it after the pipeline has created the gold layer |
+| Two metric views, one per grain | Same reason as the two gold views (see 5.3): joining intensity and mix would repeat each forecast for the nine fuels |
+| Averages are a sum divided by a count, computed at query time | An average of averages is wrong when the groups have different sizes. Illustrative example: a day with 48 half hours and a sum of 4,800 (average 100) and a day with 34 half hours and a sum of 6,800 (average 200). The average of the two averages is 150; the correct average is 11,600 / 82 = 141.46 |
+| The share of a fuel group is the sum of its percentages divided by the number of region and half hour pairs | In the generation mix each region and half hour is one pie, and each row is one slice. Example: London, 2026-11-19 12:00 UTC, Renewable = 18.6%. `AVG(percentage)` over its four rows would give 4.65, the average slice. The denominator is `COUNT(DISTINCT region_id, period_start_utc)`, counted from the data, not a number written by hand |
+| Names in snake_case, readable labels in `display_name` | The names are easy to use in SQL. The label replaces the alias in the column headers of a query (checked in SQL queries on 2026-11-21) |
+| Comments in the `comment:` field | A YAML comment with `#` was removed when the notebook was saved with `version: 1.1` |
+| Low emission = `very low` plus `low` | The labels of the API index are used as given. No official source for the limits of the classes has been found yet |
+| Averages across regions are simple | They are not weighted by regional demand, which the API does not provide (see 1.4). It is a known limit |
+
+### 8.4 Reconciliation
+
+Each metric view is compared with a query written by hand, with formulas that do not use the metric view. The two results are joined with a `FULL OUTER JOIN` on the grouping keys. The result has one row of counters: cells compared, cells present on one side only (`missing_on_one_side`), and the number of cells where the pie count, the total or the average differ. Tolerances: 1e-9 for averages, 1e-6 for totals. One test per grouping, so that every dimension is used at least once. `missing_on_one_side` is the only guard on the keys: a NULL in a comparison is never counted as a difference. For the generation mix the query written by hand has two levels (the sum for each pie, then the average over the pies), because a direct `AVG(percentage)` is the average slice. The test queries run in a notebook outside the repository.
+
+| Test | Metric view and grouping | Cells | Result |
+|---|---|---|---|
+| P1 | `metrics_carbon_intensity`, by region | 14 | No difference (2026-11-20) |
+| P2 | `metrics_carbon_intensity`, by hour and day of week | 168 (24 x 7) | No difference; the 7 pairs of day number and day name are consistent (2026-11-20) |
+| P3 | `metrics_carbon_intensity`, by date and intensity index | 3,735 | No difference. 751 days x 5 classes would be 3,755: 20 combinations do not occur in the data, and the metric view and the query written by hand agree on them (2026-11-20) |
+| P4 | `metrics_generation_mix`, by fuel group | 3 | No difference (2026-11-21) |
+| P5 | `metrics_generation_mix`, by region and fuel group | 42 (14 x 3) | No difference (2026-11-21) |
+| P6 | `metrics_generation_mix`, by date and fuel | 6,768 (752 x 9) | No difference. A direct `AVG(percentage)` is valid here, because with one fuel each pie has one row (2026-11-21) |
+| P7 | `metrics_generation_mix`, by hour, day of week and fuel group (the heatmap) | 504 (24 x 7 x 3) | No difference; 7 pairs of day number and day name (2026-11-21) |
+
+On 2026-11-21 the check cell of `metrics_generation_mix` in the setup notebook gave 504,140 region half hours, 504,140 rows in `mv_intensity_half_hour`, and 99.9968 for the shares of all fuels (they add up to about 100).
+
+### 8.5 Not checked yet
+
+* The `display_name` labels in a dashboard and in Genie.
+
+## 9. Daily checks
+
+### 9.1 Approach
+
+The notebook `checks/01_daily_job_checks` runs one SQL query after the Job `uk_carbon_refresh`. It returns one row per check, `OK` or `KO`, and a summary row (id 99) with the number of checks in `KO`.
+
+| Decision | Reason |
+|---|---|
+| Every check is a relation that holds every day, not a number written by hand | For example "gold rows = silver rows". The notebook needs no edit when new data arrives |
+| A NULL result is `KO` | The summary counts `passed IS NOT TRUE`, so a comparison with NULL is not a silent `OK` |
+| Observations are left out | Facts such as the known source gaps (see 1.3) are not relations that must hold every day |
+| The first run was validated by hand | The checks were tested on data broken on purpose (6 `KO` as expected) and validated on the real run of 2026-11-20 against a manual check of the same day |
+| A new check is also tried in `KO` | Check 26 was tried with `+ 1` in its condition: row 26 in `KO`, summary 1. With the condition restored: 27 rows, 26 `OK`, summary 0 |
+
+### 9.2 Checks by layer
+
+| Layer | Checks | What is checked |
+|---|---|---|
+| Ingestion | 1 to 3 | Last call has HTTP status 200; last call is complete; the window of the last call ends less than 26 hours ago, so the notebook fails if the Job did not run |
+| Bronze | 4 to 7 | Bronze rows equal the files in the log; no rescued data; every file has the half hours of the log (`json_array_length(data)` against `n_half_hours`); files compared equal bronze rows |
+| Silver | 8 to 16 | One row per key in `intensity` and `generation_mix`; 14 regions; no NULL forecast or percentage; last half hour equal to the end of the log window minus 30 minutes; 9 fuels; `generation_mix` rows equal 9 x `intensity` rows; `regions` has 14 rows from one file |
+| Gold | 17 to 24 | Gold rows equal silver rows, one per key, for both views; no NULL names or groups; London time is `timestamp_ntz`; same last half hour as silver; group rows equal region half hours x 4 / 2 / 3; the fuels add up to 100 +/- 0.5 |
+| Metric views | 25 and 26 | `half_hours` of `metrics_carbon_intensity` equals the gold rows; `region_half_hours` of `metrics_generation_mix` equals the gold intensity rows |
+| Summary | 99 | Number of checks in `KO` |
+
+On the runs of 2026-11-21 and 2026-11-22 the checks returned `OK` and the summary 0 (on 2026-11-21 there were 25 checks; check 26 was added the same evening and was `OK`).
+
+### 9.3 Failing the Job
+
+The notebook stores the query in the temporary view `daily_checks` and ends with a cell that calls `assert_true`. The cell returns NULL when every check is `OK`. It raises `USER_RAISED_EXCEPTION` (SQLSTATE `P0001`) with a message when at least one check is `KO`, or when the view is empty. In a Job task this makes the task fail. `assert_true` also fails on a NULL condition (checked on 2026-11-22), in line with the rule that a NULL is `KO`.
+
+Tested on 2026-11-22 in a test Job with one task that runs the notebook: serverless compute, failure email, no retries (a check in `KO` does not recover by trying again).
+
+| Case | Result |
+|---|---|
+| All checks `OK` | Run succeeded in 32 seconds |
+| Check 26 with `+ 1` in its condition | Run failed in 31 seconds: the first two cells passed, the `assert_true` cell failed with the message of the notebook, and the failure email arrived the same minute |
+
+The email is generic ("Task checks failed ... see run output for details"): the check in `KO` is read in the run output. The test also showed that the metric views read by checks 25 and 26 can be queried from a Job task.
+
+### 9.4 Next step
+
+The checks are not yet a task of `uk_carbon_refresh`: the notebook is run by hand. The planned step is a third task, after `refresh_pipeline`, with no retries, that runs this notebook, so that a `KO` turns the run red and sends the failure email. The Job runs the code of `main`, so the task can be configured only after the pull request is merged. A check that depends on a person who remembers to run it is not a check.
