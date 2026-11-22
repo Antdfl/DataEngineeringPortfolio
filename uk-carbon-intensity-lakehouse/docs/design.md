@@ -334,6 +334,7 @@ Source files are plain Python or SQL files, not notebooks; the pipeline chooses 
 |---|---|---|---|
 | `ingest_update` | Notebook `ingestion/01_ingest_regional_api` from the Git folder, serverless | Parameters `mode` = `update`, `lookback_hours` = `48` | 2 retries (3 attempts in total), 10 minutes apart; serverless auto-optimization disabled |
 | `refresh_pipeline` | Pipeline `uk_carbon_pipeline`, no full refresh | Depends on `ingest_update`; runs only if it succeeded | 1 retry (2 attempts in total), 5 minutes apart |
+| `daily_checks` | Notebook `checks/01_daily_job_checks` from the Git folder, serverless | Depends on `refresh_pipeline` | See 9.4 |
 
 ### 7.2 Job settings
 
@@ -350,6 +351,7 @@ Source files are plain Python or SQL files, not notebooks; the pipeline chooses 
 * If the ingestion fails, the notebook writes the error to the ingestion log before failing, the pipeline task does not start and the bronze table does not change. The next run recovers the missing period thanks to the 48-hour window.
 * Measured on 2026-11-15 in performance optimized mode: a run takes between 1.3 and 1.7 minutes. The Spark work (writing the log and refreshing the bronze table) takes less than 20 seconds; most of the rest is compute start and orchestration.
 * Measured in standard mode, on the scheduled runs of 2026-11-16 and 2026-11-17: a run takes between 8.4 and 10.4 minutes. The API call takes about 4 seconds; most of the rest is compute start for the two tasks.
+* Measured on 2026-11-22, in standard mode: the scheduled run of 18:10 (two tasks) took 8 minutes 36 seconds. A manual run at 21:28 with the third task took 15 minutes 56 seconds: `ingest_update` 3 minutes 16 seconds, `refresh_pipeline` 8 minutes 34 seconds, `daily_checks` 4 minutes 5 seconds. The duration of `refresh_pipeline` varied from 5 minutes 3 seconds to 8 minutes 34 seconds between the two runs; the cause is not known.
 * When a second run is queued, the waiting time is included in the duration of its first task.
 * Known limitation: the job runs the code of the branch currently checked out in the Git folder. While the schedule is active, the Git folder must stay on a tested branch.
 
@@ -454,6 +456,10 @@ Tested on 2026-11-22 in a test Job with one task that runs the notebook: serverl
 
 The email is generic ("Task checks failed ... see run output for details"): the check in `KO` is read in the run output. The test also showed that the metric views read by checks 25 and 26 can be queried from a Job task.
 
-### 9.4 Next step
+### 9.4 Third task of the Job
 
-The checks are not yet a task of `uk_carbon_refresh`: the notebook is run by hand. The planned step is a third task, after `refresh_pipeline`, with no retries, that runs this notebook, so that a `KO` turns the run red and sends the failure email. The Job runs the code of `main`, so the task can be configured only after the pull request is merged. A check that depends on a person who remembers to run it is not a check.
+The checks are the third task of `uk_carbon_refresh`, `daily_checks`, configured on 2026-11-22. It runs the notebook `checks/01_daily_job_checks` from the Git folder, after `refresh_pipeline`, on serverless compute. A `KO` turns the run red and sends the failure email, as tested in 9.3.
+
+First run, started by hand on 2026-11-22 at 21:40 in Italy (20:40 in London): succeeded in 4 minutes 5 seconds, 27 rows, all `OK`, summary row 0. The two queries take about 27 and 20 seconds, so most of the duration is outside the queries. The likely cause is the start of the serverless compute, but it was not measured.
+
+Not proven yet: a `KO` inside the real job. The failure was tested only in the test Job of section 9.3.

@@ -4,7 +4,7 @@
 
 This project answers that question for the 14 regions of Great Britain. It ingests carbon intensity and generation mix data every day from the public Carbon Intensity API (NESO), processes it through a **medallion architecture** (bronze, silver, gold) on **Databricks Free Edition**, and exposes every formula once, in **Unity Catalog metric views**, for the dashboard and any other tool.
 
-**Status:** 🚧 in progress, target December 2026. Ingestion, bronze, silver and gold are complete; metric views and automated checks are being merged; the dashboard is next.
+**Status:** 🚧 in progress, target December 2026. Ingestion, bronze, silver, gold, metric views and automated checks are complete; the dashboard is next.
 
 > 📊 *Dashboard screenshot: coming with the dashboard.*
 
@@ -28,6 +28,7 @@ flowchart LR
     MV --> DB["AI/BI Dashboard"]
     CHK["Daily checks: 26 relations"] -.-> PIPE
     CHK -.-> MV
+    CHK -.-> LOG
 ```
 
 ### 1. Ingestion
@@ -53,8 +54,8 @@ flowchart LR
 * Created once by a setup notebook, **not by the pipeline**: a metric view stores no data, and a pipeline rejects the `WITH METRICS` clause (tested).
 
 ### 6. Orchestration and checks
-* A **Lakeflow Job** runs every day at 18:10 (Europe/Rome): `ingest_update` (the last 48 hours), then `refresh_pipeline`.
-* A checks notebook runs **26 checks** after every refresh, one row per check, `OK` or `KO`, plus a summary row. Next step: run it as the third task of the job, so that a `KO` fails the run and sends the failure email.
+* A **Lakeflow Job** runs every day at 18:10 (Europe/Rome): `ingest_update` (the last 48 hours), then `refresh_pipeline`, then `daily_checks`.
+* A checks notebook runs **26 checks** after every refresh, one row per check, `OK` or `KO`, plus a summary row. It is the third task of the job: a `KO` fails the run and sends the failure email.
 
 ---
 
@@ -117,7 +118,7 @@ On a Databricks Free Edition workspace, with this repository cloned as a Git fol
 3. Create the pipeline `uk_carbon_pipeline` with the settings in [design.md, section 6](docs/design.md#6-pipeline-uk_carbon_pipeline) and run it.
 4. Run `setup/03_create_metric_views`.
 5. Create the job `uk_carbon_refresh` with the settings in [design.md, section 7](docs/design.md#7-orchestration-job-uk_carbon_refresh).
-6. After each run of the job, run `checks/01_daily_job_checks`: the summary row must be `0`.
+6. The job also runs `checks/01_daily_job_checks` as its last task: the summary row must be `0`, otherwise the run fails.
 
 *These steps have not yet been rehearsed on an empty workspace: that test is planned before the project is closed.*
 
