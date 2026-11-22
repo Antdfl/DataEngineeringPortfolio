@@ -15,11 +15,14 @@
 -- MAGIC | Summary | 99 |
 -- MAGIC
 -- MAGIC Run it after the Job has finished: check 3 fails if the last log window ended more than 26 hours ago.
+-- MAGIC
+-- MAGIC The query is stored in the temporary view `daily_checks`. The last cell makes the task fail with `assert_true` when at least one check is `KO` (or when the view is empty), so a Job run that includes this notebook turns red.
 
 -- COMMAND ----------
 
 -- Daily checks after the uk_carbon_refresh Job: one row per check, OK or KO.
 -- Every check is a relation that holds every day, not a number written by hand.
+CREATE OR REPLACE TEMP VIEW daily_checks AS
 WITH last_log AS (
   SELECT http_status,
          is_complete,
@@ -224,3 +227,14 @@ SELECT 99, 'Summary', 'Checks KO',
        CASE WHEN COUNT_IF(passed IS NOT TRUE) = 0 THEN 'OK' ELSE 'KO' END
 FROM checks
 ORDER BY id;
+
+-- COMMAND ----------
+
+SELECT * FROM daily_checks ORDER BY id;
+
+-- COMMAND ----------
+
+SELECT assert_true(
+  (SELECT COUNT(*) FROM daily_checks) > 0
+  AND (SELECT COUNT_IF(status = 'KO') FROM daily_checks) = 0,
+  'Daily checks: at least one check is KO, see the table of the previous cell');
