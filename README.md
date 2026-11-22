@@ -8,9 +8,7 @@
 
 ## 🎯 About This Repository
 
-This repository will collect my **Data Engineering projects**: data pipelines, workflows and architectures built on the modern data stack, designed and documented the way I would do it in a team.
-
-> **Status: in preparation.** No project has been published yet. The first projects are being designed. This README describes the structure they will follow, and I will update it as soon as the first one is complete.
+This repository collects my **Data Engineering projects**: data pipelines, workflows and architectures built on the modern data stack, designed and documented the way I would do it in a team.
 
 My Python projects are in **[MyProfessionalPortfolio](https://github.com/Antdfl/MyProfessionalPortfolio)** and my learning log in **[LearningPython3](https://github.com/Antdfl/LearningPython3)**.
 
@@ -18,9 +16,29 @@ My Python projects are in **[MyProfessionalPortfolio](https://github.com/Antdfl/
 
 ---
 
-## 🤝 How I Will Work on These Projects
+## 📂 Projects
+
+| # | Project | In one line | Status |
+|---|---|---|---|
+| 01 | **[UK Carbon Intensity Lakehouse](uk-carbon-intensity-lakehouse/)** | A medallion lakehouse on Databricks that answers a simple question: in which hour is the electricity of a region in Great Britain cleanest? | 🚧 In progress, target December 2026 |
+
+### 01 · UK Carbon Intensity Lakehouse
+
+- **Data:** carbon intensity and generation mix for the 14 regions of Great Britain, every half hour, from November 2024 onwards. Over 500,000 rows of carbon intensity (one per region and half hour) and over 4.5 million rows of generation mix, refreshed every day.
+- **Architecture:** a Python notebook calls the API and lands the raw JSON files in a volume; one Lakeflow Spark Declarative Pipeline builds bronze (Auto Loader), silver (expectations and AUTO CDC) and gold (materialized views); Unity Catalog metric views hold every formula once, so the dashboard and any other tool read the same numbers.
+- **Engineering choices:** idempotent ingestion with a completeness flag for every call and a guard against oversized backfills; timestamps stored in UTC and shown in London time; 26 automated checks after every daily refresh, tested against deliberately broken data.
+- **Stack:** Databricks Free Edition, Python, SQL, Delta Lake, Auto Loader, Lakeflow Spark Declarative Pipelines, Lakeflow Jobs, Unity Catalog, AI/BI Dashboard.
+- **Done so far:** ingestion, bronze, silver and gold. **Under way:** metric views, automated checks as a job task, dashboard.
+- **Detailed design:** [docs/design.md](uk-carbon-intensity-lakehouse/docs/design.md).
+- **Data source:** Carbon Intensity API, National Energy System Operator (NESO), CC BY 4.0. This project is not endorsed by NESO.
+
+---
+
+## 🤝 How I Work on These Projects
 
 I do the **analysis, the design and the end to end testing**. The code is developed with an AI coding assistant (Claude Code), working from my analysis and design documents. I state this openly: what I bring is the judgement around the code, meaning what to build, how to model the data and how to verify that it works.
+
+Each layer goes through its own pull request, with its tests and its documentation.
 
 ---
 
@@ -37,7 +55,7 @@ I do the **analysis, the design and the end to end testing**. The code is develo
 ### Current Tech Stack
 
 - **Databases:** Oracle 19c (expert), PL/SQL, SQL optimization, PostgreSQL
-- **Data Engineering:** Databricks and Apache Spark (certified at Associate and Professional level), Python (intermediate) with Pandas
+- **Data Engineering:** Databricks and Apache Spark (certified at Associate and Professional level), Lakeflow Spark Declarative Pipelines, Lakeflow Jobs, Delta Lake, Unity Catalog, Python (intermediate) with Pandas
 - **In progress:** dbt and Airflow
 - **Tools:** Git, GitHub Copilot, Claude Code
 - **Methodologies:** Agile/Scrum (Professional Scrum Developer I certified)
@@ -56,25 +74,22 @@ I do the **analysis, the design and the end to end testing**. The code is develo
 
 ---
 
-## 📂 Planned Structure
+## 📁 Repository Structure
 
 ```
 DataEngineeringPortfolio/
-├── <project-01>/    # in preparation
-├── <project-02>/    # in preparation
-└── ...
+├── README.md                          # this page: overview of all projects
+├── LICENSE
+└── uk-carbon-intensity-lakehouse/     # project 01, in progress
 ```
 
-### 📁 Project Folder Convention
-
-Every project folder will contain two documentation files:
+### Project Folder Convention
 
 | File | Purpose |
 |---|---|
-| `README.md` | **Analysis and Design**: problem statement, requirements, architecture decisions, technical approach and implementation notes |
-| `retrospective.md` | **Lessons Learned**: what I took away from the project, open tasks and next steps, and what I would do differently |
-
-This structure enforces deliberate reflection: not just *building* things, but understanding *why* choices were made and *what* to carry forward.
+| `README.md` | **Project overview**: the problem, the architecture at a glance, what is in the folder, how to reproduce it, known limits |
+| `docs/design.md` | **Detailed design**: source behaviour, decisions layer by layer, data quality rules, orchestration |
+| `retrospective.md` | **Lessons learned**: open tasks, next steps and what I would do differently (written when a project is complete) |
 
 ---
 
@@ -103,8 +118,8 @@ I'm seeking **Data Engineer**, **Senior Database Developer** or **Data Architect
 
 ## 📄 License
 
-Released under the **GNU General Public License v3.0** (see `LICENSE`). Starter code, templates and other third party material from courses keep their original licenses.
+Released under the **GNU General Public License v3.0** (see `LICENSE`). Starter code, templates and other third party material from courses keep their original licenses. Data used by each project keeps its own licence, stated in the project.
 
 ---
 
-**Last Updated:** October 2026
+**Last Updated:** November 2026
