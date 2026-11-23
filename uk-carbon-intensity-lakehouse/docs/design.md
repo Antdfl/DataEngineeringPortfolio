@@ -334,7 +334,7 @@ Source files are plain Python or SQL files, not notebooks; the pipeline chooses 
 |---|---|---|---|
 | `ingest_update` | Notebook `ingestion/01_ingest_regional_api` from the Git folder, serverless | Parameters `mode` = `update`, `lookback_hours` = `48` | 2 retries (3 attempts in total), 10 minutes apart; serverless auto-optimization disabled |
 | `refresh_pipeline` | Pipeline `uk_carbon_pipeline`, no full refresh | Depends on `ingest_update`; runs only if it succeeded | 1 retry (2 attempts in total), 5 minutes apart |
-| `daily_checks` | Notebook `checks/01_daily_job_checks` from the Git folder, serverless | Depends on `refresh_pipeline` | See 9.4 |
+| `daily_checks` | Notebook `checks/01_daily_job_checks` from the Git folder, serverless | Depends on `refresh_pipeline` | None (a check in `KO` does not recover by trying again) |
 
 ### 7.2 Job settings
 
@@ -452,7 +452,7 @@ Tested on 2026-11-22 in a test Job with one task that runs the notebook: serverl
 | Case | Result |
 |---|---|
 | All checks `OK` | Run succeeded in 32 seconds |
-| Check 26 with `+ 1` in its condition | Run failed in 31 seconds: the first two cells passed, the `assert_true` cell failed with the message of the notebook, and the failure email arrived the same minute |
+| Check 25 with `+ 1` in its condition | Run failed in 31 seconds: the first two cells passed, the `assert_true` cell failed with the message of the notebook, and the failure email arrived the same minute |
 
 The email is generic ("Task checks failed ... see run output for details"): the check in `KO` is read in the run output. The test also showed that the metric views read by checks 25 and 26 can be queried from a Job task.
 
@@ -460,6 +460,8 @@ The email is generic ("Task checks failed ... see run output for details"): the 
 
 The checks are the third task of `uk_carbon_refresh`, `daily_checks`, configured on 2026-11-22. It runs the notebook `checks/01_daily_job_checks` from the Git folder, after `refresh_pipeline`, on serverless compute. A `KO` turns the run red and sends the failure email, as tested in 9.3.
 
-First run, started by hand on 2026-11-22 at 21:40 in Italy (20:40 in London): succeeded in 4 minutes 5 seconds, 27 rows, all `OK`, summary row 0. The two queries take about 27 and 20 seconds, so most of the duration is outside the queries. The likely cause is the start of the serverless compute, but it was not measured.
+First run, started by hand on 2026-11-22 at 21:28 in Italy (20:28 in London); the task `daily_checks` started at 21:40 and succeeded in 4 minutes 5 seconds, 27 rows, all `OK`, summary row 0. The two queries take about 27 and 20 seconds, so most of the duration is outside the queries. The likely cause is the start of the serverless compute, but it was not measured.
+
+First automatic run, started by the scheduler on 2026-11-23 at 18:10 in Italy (17:10 in London): the three tasks succeeded in 14 minutes 50 seconds (`ingest_update` 3 minutes 47 seconds, `refresh_pipeline` 7 minutes 24 seconds, `daily_checks` 3 minutes 39 seconds), 27 rows, all `OK`, summary row 0.
 
 Not proven yet: a `KO` inside the real job. The failure was tested only in the test Job of section 9.3.
