@@ -1,0 +1,208 @@
+{
+  "datasets": [
+    {
+      "name": "1799d35f",
+      "displayName": "heatmap_avg_intensity",
+      "queryLines": [
+        "SELECT day_of_week,\r\n",
+        "       day_name,\r\n",
+        "       hour_uk,\r\n",
+        "       MEASURE(avg_intensity) AS avg_intensity\r\n",
+        "FROM portfolio.uk_carbon_gold.metrics_carbon_intensity\r\n",
+        "WHERE :region = 'All regions' OR region = :region\r\n",
+        "GROUP BY day_of_week, day_name, hour_uk\r\n",
+        "ORDER BY day_of_week, hour_uk"
+      ],
+      "parameters": [
+        {
+          "displayName": "region",
+          "keyword": "region",
+          "dataType": "STRING",
+          "defaultSelection": {
+            "values": {
+              "dataType": "STRING",
+              "values": [
+                {
+                  "value": "All regions"
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "e748ffef",
+      "displayName": "region_list",
+      "queryLines": [
+        "SELECT region, half_hours\r\n",
+        "FROM (\r\n",
+        "  SELECT 'All regions' AS region, MEASURE(half_hours) AS half_hours, 0 AS sort_key\r\n",
+        "  FROM portfolio.uk_carbon_gold.metrics_carbon_intensity\r\n",
+        "  UNION ALL\r\n",
+        "  SELECT region, MEASURE(half_hours) AS half_hours, 1 AS sort_key\r\n",
+        "  FROM portfolio.uk_carbon_gold.metrics_carbon_intensity\r\n",
+        "  GROUP BY region\r\n",
+        ")\r\n",
+        "ORDER BY sort_key, region"
+      ]
+    }
+  ],
+  "pages": [
+    {
+      "name": "db62d793",
+      "displayName": "Test",
+      "layout": [
+        {
+          "widget": {
+            "name": "c4c3756c",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "1799d35f",
+                  "fields": [
+                    {
+                      "name": "sum(avg_intensity)",
+                      "expression": "SUM(`avg_intensity`)"
+                    },
+                    {
+                      "name": "hour_uk",
+                      "expression": "`hour_uk`"
+                    },
+                    {
+                      "name": "day_name",
+                      "expression": "`day_name`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "frame": {
+                "showTitle": false
+              },
+              "version": 3,
+              "widgetType": "heatmap",
+              "encodings": {
+                "x": {
+                  "fieldName": "hour_uk",
+                  "scale": {
+                    "type": "quantitative"
+                  }
+                },
+                "y": {
+                  "fieldName": "day_name",
+                  "scale": {
+                    "type": "categorical",
+                    "sort": {
+                      "by": "custom-order",
+                      "orderedValues": [
+                        "Mon",
+                        "Tue",
+                        "Wed",
+                        "Thu",
+                        "Fri",
+                        "Sat",
+                        "Sun"
+                      ]
+                    }
+                  }
+                },
+                "color": {
+                  "fieldName": "sum(avg_intensity)",
+                  "legend": {
+                    "title": "Average intensity (gCO2/kWh)"
+                  },
+                  "scale": {
+                    "type": "quantitative"
+                  }
+                }
+              },
+              "data": {
+                "queryName": "main_query"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 6,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "f7d940a9",
+            "queries": [
+              {
+                "name": "dashboards/01f1e77e19b21cca80fddd9303896a42/datasets/01f1e78074eb1a83883ebe90be6b1a57_region",
+                "query": {
+                  "datasetName": "e748ffef",
+                  "fields": [
+                    {
+                      "name": "region",
+                      "expression": "`region`"
+                    },
+                    {
+                      "name": "region_associativity",
+                      "expression": "COUNT_IF(`associative_filter_predicate_group`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "parameter_dashboards/01f1e77e19b21cca80fddd9303896a42/datasets/01f1e77e43d61f34ac990a1ab2819c22_region",
+                "query": {
+                  "datasetName": "1799d35f",
+                  "parameters": [
+                    {
+                      "name": "region",
+                      "keyword": "region"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "frame": {
+                "showTitle": true
+              },
+              "widgetType": "filter-single-select",
+              "encodings": {
+                "fields": [
+                  {
+                    "fieldName": "region",
+                    "queryName": "dashboards/01f1e77e19b21cca80fddd9303896a42/datasets/01f1e78074eb1a83883ebe90be6b1a57_region"
+                  },
+                  {
+                    "parameterName": "region",
+                    "queryName": "parameter_dashboards/01f1e77e19b21cca80fddd9303896a42/datasets/01f1e77e43d61f34ac990a1ab2819c22_region"
+                  }
+                ]
+              }
+            }
+          },
+          "position": {
+            "x": 6,
+            "y": 0,
+            "width": 4,
+            "height": 1
+          }
+        }
+      ],
+      "pageType": "PAGE_TYPE_CANVAS",
+      "layoutVersion": "GRID_V1"
+    }
+  ],
+  "uiSettings": {
+    "theme": {
+      "widgetHeaderAlignment": "ALIGNMENT_UNSPECIFIED"
+    },
+    "applyModeEnabled": false
+  }
+}
