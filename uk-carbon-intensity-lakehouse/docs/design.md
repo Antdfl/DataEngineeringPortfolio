@@ -1,6 +1,6 @@
 # UK Carbon Intensity Lakehouse: design document
 
-Status: draft, sections 1 to 9. Last updated: 2026-11-22.
+Status: draft, sections 1 to 10. Last updated: 2026-11-27.
 
 ## 1. Data source
 
@@ -467,3 +467,99 @@ First run, started by hand on 2026-11-22 at 21:28 in Italy (20:28 in London); th
 First automatic run, started by the scheduler on 2026-11-23 at 18:10 in Italy (17:10 in London): the three tasks succeeded in 14 minutes 50 seconds (`ingest_update` 3 minutes 47 seconds, `refresh_pipeline` 7 minutes 24 seconds, `daily_checks` 3 minutes 39 seconds), 27 rows, all `OK`, summary row 0.
 
 Proven on 2026-11-24 inside the real job: a manual run at 22:30 in Italy (21:30 in London), from a test branch with `+ 1` in the condition of check 25, failed as expected: row 25 `KO`, summary row 1, failure email at 22:44. The test branch was then deleted.
+
+## 10. Dashboard
+
+### 10.1 Purpose
+
+The AI/BI dashboard `uk_carbon_dashboard` answers one question: *when is the best time to run a washing machine?* It has one page, read from top to bottom, with a region filter at the top and three bands.
+
+| Band | Question | Content |
+|---|---|---|
+| 1. Now | What is the carbon intensity of the latest half hour? | Average intensity, number of regions counted, regions by intensity class |
+| 2. When | Which hours are usually cleaner? | Heatmap of the average intensity by day of the week and hour, over all the data |
+| 3. Why | What is the electricity made of in the best and in the worst hour? | Generation mix by fuel group in the best and in the worst cell of the heatmap |
+
+All times are London time (see 5.3). Changing the region changes every widget.
+
+### 10.2 Datasets
+
+The datasets read only the metric views (see 8), never the gold views. A dataset with a parameter uses `region`, a string with the default `All regions`, and the condition `:region = 'All regions' OR region = :region`. The value is case sensitive: `All Regions` returns no rows, without an error.
+
+| Dataset | Metric view | Parameter | Rows | Used by |
+|---|---|---|---|---|
+| `region_list` | `metrics_carbon_intensity` | No | 15: `All regions` and the 14 regions | Region filter |
+| `now_intensity` | `metrics_carbon_intensity` | `region` | 1: the latest half hour | Counter and table |
+| `now_index_classes` | `metrics_carbon_intensity` | `region` | 5: always the five classes | Bar chart of the classes |
+| `heatmap_avg_intensity` | `metrics_carbon_intensity` | `region` | 168 (7 days x 24 hours) | Heatmap |
+| `mix_best_worst` | `metrics_carbon_intensity` and `metrics_generation_mix` | `region` | 6 (2 cells x 3 fuel groups) | Stacked bar chart |
+
+The queries are in the export file (see 10.5), in `queryLines`.
+
+### 10.3 Widgets and layout
+
+The page uses a grid of 12 columns.
+
+| Row | Widget | Dataset | Settings |
+|---|---|---|---|
+| Filter | Region, single value | `region_list` | Linked to the parameter `region` of the four datasets that have it |
+| Band 1 | Counter "Latest half hour (gCO2/kWh)" | `now_intensity` | `avg_intensity` |
+| Band 1 | Table | `now_intensity` | Half hour (London), Regions |
+| Band 1 | Bar chart "Regions by intensity class (latest half hour)" | `now_index_classes` | Classes in a custom order, from very low to very high; labels on |
+| Band 2 | Heatmap "Average carbon intensity by day and hour (London time, all data)" | `heatmap_avg_intensity` | X the hour, Y the day (Mon to Sun), colour the average intensity |
+| Band 3 | Stacked bar chart "Generation mix in the best and worst hour" | `mix_best_worst` | X the cell (for example `Best: Sun 11`), Y the average share, colour the fuel group; labels on |
+| Footer | Text | | Attribution (see 1.2) and "All times are London time" |
+
+The counter, the bar charts and the heatmap show the value as `SUM(...)`. This is correct because each mark of the chart has exactly one row in the dataset.
+
+### 10.4 Design decisions
+
+| Decision | Reason |
+|---|---|
+| The datasets read only the metric views | One formula for each measure, shared by the dashboard and Genie. Presentation (the hour as text, the order of the classes) is done in the dataset query, on top of the metric view |
+| Averages are computed in the query with `MEASURE(avg_intensity)`, never with the `AVG` of a widget | The `AVG` of rows that are already averages is an average of averages (see 8.3) |
+| The latest half hour is `MAX(half_hour_utc)` among the rows kept by the filter | The key is UTC (see 8.3); London time is only shown. The metric view had only the hour, and "the latest hour" would have mixed two half hours: the dimensions `half_hour_utc` and `half_hour_uk` were added to the metric view on 2026-11-25, instead of an average written by hand in the dashboard |
+| The time is shown as text, with `date_format(half_hour_uk, 'yyyy-MM-dd HH:mm')` | The dashboard offers only 12-hour formats for times |
+| The five classes come from a fixed list, with a `LEFT JOIN` and `COALESCE(regions, 0)` | A `GROUP BY` creates no group for a class with no regions: on 2026-11-26 at 16:30 in London no region was `high`, and the class disappeared from the chart. A missing class must show as 0, not vanish. The fixed list also keeps the order of the bars stable |
+| The best and the worst cell are computed for the selected region | Checked on 2026-11-27: the best cell of all regions (Sun 11) is the best one in 4 regions out of 14, and the worst one (Wed 19) in 2; only London has both. Fixed cells would show a wrong label for most regions. The dataset ranks the 168 cells of the region with `ROW_NUMBER()`, then reads the mix of the two cells |
+| The datasets are not materialized | Materialization (Beta) does not support datasets with parameters, so only `region_list` could be materialized, and it is already fast. It would also add a refresh schedule different from the Job |
+
+### 10.5 Versioning and publishing
+
+The dashboard that is edited lives in the home folder of the user, outside the Git folder. The repository keeps its export, `dashboards/uk_carbon_dashboard.lvdash.json`, replaced after every change.
+
+| Fact | Consequence |
+|---|---|
+| A `.lvdash.json` file inside the Git folder becomes a live dashboard. On 2026-11-27 it was created again when the Git folder was switched to the branch that contains the file | The copy in the Git folder is never edited, so that only one dashboard is changed |
+| "Commit to Git" in the dashboard only offers to move the dashboard into the Git folder | Not used |
+| Importing a file creates a new dashboard | To replace the export: move the old copy in the Git folder to the trash, then import the new file into the same folder. Git sees one modified file (on 2026-11-27: 497 insertions, 7 deletions, 698 lines) |
+
+The dashboard is published with shared data permissions: viewers run the queries with the credentials of the publisher. The published version is a copy of the draft at the time of publishing, so it must be published again after every change to the draft.
+
+### 10.6 Checks
+
+* The metric view by half hour was reconciled with a query written by hand (P8 in 8.4).
+* Each dataset was run with `All regions` and with at least one region before its widget was built, and each widget was compared with its dataset.
+* The best and worst cells of `mix_best_worst` match a ranking query written outside the dashboard, for all regions and for each region.
+
+| Check on 2026-11-27 (latest half hour: 16:30 London time) | All regions | London | Yorkshire |
+|---|---|---|---|
+| Latest half hour (gCO2/kWh) | 183.71, 14 regions | 240, 1 region | 124, 1 region |
+| Classes, from very low to very high | 3 / 1 / 1 / 3 / 6 | 0 / 0 / 0 / 0 / 1 | 0 / 0 / 1 / 0 / 0 |
+| Best cell (gCO2/kWh) | Sun 11, 86.59 | Sun 11, 109.14 | Sun 5, 102.27 |
+| Worst cell (gCO2/kWh) | Wed 19, 161.61 | Wed 19, 185.59 | Wed 18, 164.21 |
+| Shares in the best cell (Fossil / Nuclear and other / Renewable) | 16.83 / 26.68 / 56.49 | 16.12 / 46.97 / 36.91 | 14.79 / 11.80 / 73.40 |
+| Shares in the worst cell | 37.23 / 21.60 / 41.17 | 40.42 / 30.52 / 29.06 | 30.32 / 6.25 / 63.43 |
+
+The three shares of each cell add up to 100 +/- 0.01.
+
+### 10.7 Known limits
+
+* Averages across regions are not weighted by demand (see 8.3).
+* The colour scale of the heatmap is relative to the selected region: the same colour means different values in two regions.
+* The limits of the intensity classes are not published (see 8.3).
+* A high Renewable share does not always mean a low intensity: in Yorkshire the worst cell has 63.43% Renewable and 164.21 gCO2/kWh. Biomass is in the Renewable group but is not zero carbon (see 5.4). The breakdown by fuel has not been checked yet.
+* If two cells had exactly the same average, `ROW_NUMBER()` would pick one of them.
+* A sixth class sent by the API would be dropped by the `LEFT JOIN` of the fixed list. It would show, because the bars would add up to fewer regions than the table.
+* The best and the worst cell are averages over all the data: on a single day the order can be different.
+* Genie on the same metric views has not been tested yet. In the published dashboard a Genie box at the bottom of the page covers part of band 3; it can be closed.
