@@ -4,9 +4,9 @@
 
 This project answers that question for the 14 regions of Great Britain. It ingests carbon intensity and generation mix data every day from the public Carbon Intensity API (NESO), processes it through a **medallion architecture** (bronze, silver, gold) on **Databricks Free Edition**, and exposes every formula once, in **Unity Catalog metric views**, for the dashboard and any other tool.
 
-**Status:** 🚧 in progress, target December 2026. Ingestion, bronze, silver, gold, metric views and automated checks are complete; the dashboard is next.
+**Status:** 🚧 in progress, target December 2026. Ingestion, bronze, silver, gold, metric views, automated checks and the dashboard are complete; Genie and a rehearsal of the setup on an empty workspace are next.
 
-> 📊 *Dashboard screenshot: coming with the dashboard.*
+> 📊 *Dashboard screenshot: coming before the project is closed.*
 
 The detailed design (measured API behaviour, decisions layer by layer, data quality rules, orchestration) is in **[docs/design.md](docs/design.md)**.
 
@@ -57,6 +57,11 @@ flowchart LR
 * A **Lakeflow Job** runs every day at 18:10 (Europe/Rome): `ingest_update` (the last 48 hours), then `refresh_pipeline`, then `daily_checks`.
 * A checks notebook runs **26 checks** after every refresh, one row per check, `OK` or `KO`, plus a summary row. It is the third task of the job: a `KO` fails the run and sends the failure email.
 
+### 7. Dashboard
+* One page, one region filter, three bands: **now** (the latest half hour and the regions by intensity class), **when** (heatmap of the average intensity by day and hour, London time) and **why** (generation mix in the best and in the worst hour of the selected region).
+* Every dataset reads **only the metric views**, so the dashboard and Genie share one formula; presentation (labels, order, time format) stays in the dataset query.
+* The dashboard is edited in the workspace, and its export is versioned in `dashboards/`.
+
 ---
 
 ## 🚀 Key Engineering Highlights
@@ -65,9 +70,10 @@ flowchart LR
 * **Overlaps by design, duplicates never.** The daily job asks for 48 hours every 24, so a failed day is recovered by the next run; AUTO CDC removes the overlap in one place.
 * **Master and detail stay separate.** Intensity has one row per region and half hour, the mix has nine. Joining them would repeat each value nine times, so there are two views and two metric views, each formula at its own level.
 * **No average of averages.** Every average is a sum divided by a count at query time; the share of a fuel group is the sum of the percentages divided by the number of region and half hour pairs.
-* **A metric view that answers is not necessarily right.** Every dimension and measure was reconciled against a hand-written query with independent formulas (seven tests, `FULL OUTER JOIN` so that a missing group shows up).
+* **A metric view that answers is not necessarily right.** Every dimension and measure was reconciled against a hand-written query with independent formulas (eight tests, `FULL OUTER JOIN` so that a missing group shows up).
 * **Checks test relations, not numbers.** For example: gold rows equal silver rows, the mix has nine rows per intensity row, the last half hour matches the log. The checks were also run against deliberately broken data, to prove that they can fail.
 * **Clock changes as a test.** In London time the last Sunday of March has 46 half hours and the last Sunday of October 50: seeing them in the gold layer proves that days are cut in London time.
+* **A missing value must show.** The dashboard reads the five intensity classes from a fixed list, so a class with no regions shows as 0 instead of disappearing; the best and worst hours are computed for the selected region, because they differ from region to region.
 
 ---
 
@@ -78,7 +84,7 @@ flowchart LR
 * **Frameworks:** Lakeflow Spark Declarative Pipelines, Auto Loader, AUTO CDC, Delta Lake
 * **Orchestration:** Lakeflow Jobs
 * **Semantic layer:** Unity Catalog metric views (YAML, version 1.1)
-* **Visualization:** AI/BI Dashboard (in progress)
+* **Visualization:** AI/BI Dashboard, one page with a region filter, exported to the repository as JSON
 * **Version control:** Git folder in Databricks, GitHub, one pull request per layer
 
 ---
@@ -103,6 +109,7 @@ uk-carbon-intensity-lakehouse/
 ├── ingestion/                 # notebook that calls the API and writes files and log
 ├── pipeline/transformations/  # 01_bronze.py, 02_silver.py, 03_gold.sql
 ├── checks/                    # daily checks after the refresh job
+├── dashboards/                # export of the AI/BI dashboard (.lvdash.json)
 ├── docs/design.md             # detailed design
 └── exploration/               # first inspection of the API (not part of the pipeline)
 ```
@@ -119,6 +126,7 @@ On a Databricks Free Edition workspace, with this repository cloned as a Git fol
 4. Run `setup/03_create_metric_views`.
 5. Create the job `uk_carbon_refresh` with the settings in [design.md, section 7](docs/design.md#7-orchestration-job-uk_carbon_refresh).
 6. The job also runs `checks/01_daily_job_checks` as its last task: the summary row must be `0`, otherwise the run fails.
+7. Import `dashboards/uk_carbon_dashboard.lvdash.json` into the workspace, outside the Git folder (an import creates a new dashboard), then publish it ([design.md, section 10](docs/design.md#10-dashboard)).
 
 *These steps have not yet been rehearsed on an empty workspace: that test is planned before the project is closed.*
 
@@ -127,6 +135,7 @@ On a Databricks Free Edition workspace, with this repository cloned as a Git fol
 ## ⚠️ Known Limits
 
 * **Averages across regions are not weighted by consumption:** the regional API does not provide demand.
+* **The heatmap colours are relative to the selected region**, and the best and worst hours are averages over all the data: on a single day the order can differ.
 * **The carbon intensity is a NESO estimate** (`forecast`), not a measured value. Regional data are flagged as beta by NESO.
 * **Free Edition:** serverless only, daily quotas, no commercial use. The job runs the branch checked out in the Git folder.
 * **Pipeline and job settings live in the workspace**, documented in `design.md`; Databricks Asset Bundles are a possible next step.
