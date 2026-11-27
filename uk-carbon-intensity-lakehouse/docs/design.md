@@ -369,7 +369,7 @@ Both are in `portfolio.uk_carbon_gold` and are defined in `setup/03_create_metri
 
 | Metric view | Source | Dimensions | Measures |
 |---|---|---|---|
-| `metrics_carbon_intensity` | `mv_intensity_half_hour` | `region`, `date_uk`, `hour_uk`, `day_of_week`, `day_name`, `intensity_index` | `half_hours`, `total_intensity`, `avg_intensity`, `low_emission_half_hours`, `low_emission_share_pct` |
+| `metrics_carbon_intensity` | `mv_intensity_half_hour` | `region`, `date_uk`, `hour_uk`, `half_hour_utc`, `half_hour_uk`, `day_of_week`, `day_name`, `intensity_index` | `half_hours`, `total_intensity`, `avg_intensity`, `low_emission_half_hours`, `low_emission_share_pct` |
 | `metrics_generation_mix` | `mv_fuel_mix_half_hour` | `region`, `date_uk`, `hour_uk`, `day_of_week`, `day_name`, `fuel_group`, `fuel` | `region_half_hours`, `total_percentage`, `avg_share_pct` |
 
 | Measure | Formula |
@@ -395,6 +395,7 @@ Both are in `portfolio.uk_carbon_gold` and are defined in `setup/03_create_metri
 | Comments in the `comment:` field | A YAML comment with `#` was removed when the notebook was saved with `version: 1.1` |
 | Low emission = `very low` plus `low` | The labels of the API index are used as given. No official source for the limits of the classes has been found yet |
 | Averages across regions are simple | They are not weighted by regional demand, which the API does not provide (see 1.4). It is a known limit |
+| The half hour dimensions use the UTC start as the key, and London time only as a label | In October the London clock repeats 01:00 and 01:30: with London time as the key, two different half hours would be merged. The data have 36,202 UTC half hours and 36,198 London times (see P8 in 8.4) |
 
 ### 8.4 Reconciliation
 
@@ -409,12 +410,13 @@ Each metric view is compared with a query written by hand, with formulas that do
 | P5 | `metrics_generation_mix`, by region and fuel group | 42 (14 x 3) | No difference (2026-11-21) |
 | P6 | `metrics_generation_mix`, by date and fuel | 6,768 (752 x 9) | No difference. A direct `AVG(percentage)` is valid here, because with one fuel each pie has one row (2026-11-21) |
 | P7 | `metrics_generation_mix`, by hour, day of week and fuel group (the heatmap) | 504 (24 x 7 x 3) | No difference; 7 pairs of day number and day name (2026-11-21) |
+| P8 | `metrics_carbon_intensity`, by half hour (`half_hour_utc`, `half_hour_uk`) | 36,202 | No difference; every half hour has the 14 regions; 36,198 distinct London times, 4 fewer than the UTC half hours because of the two October clock changes in the data (2026-11-25) |
 
 On 2026-11-21 the check cell of `metrics_generation_mix` in the setup notebook gave 504,140 region half hours, 504,140 rows in `mv_intensity_half_hour`, and 99.9968 for the shares of all fuels (they add up to about 100).
 
 ### 8.5 Not checked yet
 
-* The `display_name` labels in a dashboard and in Genie.
+* The `display_name` labels in Genie. In a dashboard they are used in the list of fields (checked on 2026-11-25).
 
 ## 9. Daily checks
 
@@ -464,4 +466,4 @@ First run, started by hand on 2026-11-22 at 21:28 in Italy (20:28 in London); th
 
 First automatic run, started by the scheduler on 2026-11-23 at 18:10 in Italy (17:10 in London): the three tasks succeeded in 14 minutes 50 seconds (`ingest_update` 3 minutes 47 seconds, `refresh_pipeline` 7 minutes 24 seconds, `daily_checks` 3 minutes 39 seconds), 27 rows, all `OK`, summary row 0.
 
-Not proven yet: a `KO` inside the real job. The failure was tested only in the test Job of section 9.3.
+Proven on 2026-11-24 inside the real job: a manual run at 22:30 in Italy (21:30 in London), from a test branch with `+ 1` in the condition of check 25, failed as expected: row 25 `KO`, summary row 1, failure email at 22:44. The test branch was then deleted.
