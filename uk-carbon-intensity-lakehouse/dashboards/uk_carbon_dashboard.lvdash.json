@@ -1,0 +1,698 @@
+{
+  "datasets": [
+    {
+      "name": "1799d35f",
+      "displayName": "heatmap_avg_intensity",
+      "queryLines": [
+        "SELECT day_of_week,\r\n",
+        "       day_name,\r\n",
+        "       hour_uk,\r\n",
+        "       MEASURE(avg_intensity) AS avg_intensity\r\n",
+        "FROM portfolio.uk_carbon_gold.metrics_carbon_intensity\r\n",
+        "WHERE :region = 'All regions' OR region = :region\r\n",
+        "GROUP BY day_of_week, day_name, hour_uk\r\n",
+        "ORDER BY day_of_week, hour_uk"
+      ],
+      "parameters": [
+        {
+          "displayName": "region",
+          "keyword": "region",
+          "dataType": "STRING",
+          "defaultSelection": {
+            "values": {
+              "dataType": "STRING",
+              "values": [
+                {
+                  "value": "All regions"
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "e748ffef",
+      "displayName": "region_list",
+      "queryLines": [
+        "SELECT region, half_hours\r\n",
+        "FROM (\r\n",
+        "  SELECT 'All regions' AS region, MEASURE(half_hours) AS half_hours, 0 AS sort_key\r\n",
+        "  FROM portfolio.uk_carbon_gold.metrics_carbon_intensity\r\n",
+        "  UNION ALL\r\n",
+        "  SELECT region, MEASURE(half_hours) AS half_hours, 1 AS sort_key\r\n",
+        "  FROM portfolio.uk_carbon_gold.metrics_carbon_intensity\r\n",
+        "  GROUP BY region\r\n",
+        ")\r\n",
+        "ORDER BY sort_key, region"
+      ]
+    },
+    {
+      "name": "be63a5e0",
+      "displayName": "now_intensity",
+      "queryLines": [
+        "WITH per_half_hour AS (\r\n",
+        "  SELECT half_hour_utc,\r\n",
+        "         half_hour_uk,\r\n",
+        "         MEASURE(avg_intensity) AS avg_intensity,\r\n",
+        "         MEASURE(half_hours)    AS regions_counted\r\n",
+        "  FROM portfolio.uk_carbon_gold.metrics_carbon_intensity\r\n",
+        "  WHERE :region = 'All regions' OR region = :region\r\n",
+        "  GROUP BY half_hour_utc, half_hour_uk\r\n",
+        ")\r\n",
+        "SELECT half_hour_uk,\r\n",
+        "       date_format(half_hour_uk, 'yyyy-MM-dd HH:mm') AS half_hour_london,\r\n",
+        "       avg_intensity,\r\n",
+        "       regions_counted\r\n",
+        "FROM per_half_hour\r\n",
+        "WHERE half_hour_utc = (SELECT MAX(half_hour_utc) FROM per_half_hour)"
+      ],
+      "parameters": [
+        {
+          "displayName": "region",
+          "keyword": "region",
+          "dataType": "STRING",
+          "defaultSelection": {
+            "values": {
+              "dataType": "STRING",
+              "values": [
+                {
+                  "value": "All regions"
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "30e0284d",
+      "displayName": "now_index_classes",
+      "queryLines": [
+        "WITH per_class AS (\r\n",
+        "  SELECT half_hour_utc,\r\n",
+        "         intensity_index,\r\n",
+        "         MEASURE(half_hours) AS regions\r\n",
+        "  FROM portfolio.uk_carbon_gold.metrics_carbon_intensity\r\n",
+        "  WHERE :region = 'All regions' OR region = :region\r\n",
+        "  GROUP BY half_hour_utc, intensity_index\r\n",
+        "),\r\n",
+        "latest AS (\r\n",
+        "  SELECT intensity_index, regions\r\n",
+        "  FROM per_class\r\n",
+        "  WHERE half_hour_utc = (SELECT MAX(half_hour_utc) FROM per_class)\r\n",
+        "),\r\n",
+        "classes AS (\r\n",
+        "  SELECT intensity_index, index_order\r\n",
+        "  FROM VALUES ('very low', 1), ('low', 2), ('moderate', 3), ('high', 4), ('very high', 5)\r\n",
+        "       AS c(intensity_index, index_order)\r\n",
+        ")\r\n",
+        "SELECT c.intensity_index,\r\n",
+        "       COALESCE(l.regions, 0) AS regions,\r\n",
+        "       c.index_order\r\n",
+        "FROM classes c\r\n",
+        "LEFT JOIN latest l\r\n",
+        "       ON l.intensity_index = c.intensity_index\r\n",
+        "ORDER BY c.index_order"
+      ],
+      "parameters": [
+        {
+          "displayName": "region",
+          "keyword": "region",
+          "dataType": "STRING",
+          "defaultSelection": {
+            "values": {
+              "dataType": "STRING",
+              "values": [
+                {
+                  "value": "All regions"
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "c100f93f",
+      "displayName": "mix_best_worst",
+      "queryLines": [
+        "WITH cells AS (\r\n",
+        "  SELECT day_of_week,\r\n",
+        "         day_name,\r\n",
+        "         hour_uk,\r\n",
+        "         MEASURE(avg_intensity) AS avg_intensity\r\n",
+        "  FROM portfolio.uk_carbon_gold.metrics_carbon_intensity\r\n",
+        "  WHERE :region = 'All regions' OR region = :region\r\n",
+        "  GROUP BY day_of_week, day_name, hour_uk\r\n",
+        "),\r\n",
+        "ranked AS (\r\n",
+        "  SELECT day_of_week, day_name, hour_uk, avg_intensity,\r\n",
+        "         ROW_NUMBER() OVER (ORDER BY avg_intensity ASC)  AS rank_best,\r\n",
+        "         ROW_NUMBER() OVER (ORDER BY avg_intensity DESC) AS rank_worst\r\n",
+        "  FROM cells\r\n",
+        "),\r\n",
+        "extremes AS (\r\n",
+        "  SELECT CASE WHEN rank_best = 1 THEN 'Best' ELSE 'Worst' END AS side,\r\n",
+        "         day_of_week, day_name, hour_uk, avg_intensity\r\n",
+        "  FROM ranked\r\n",
+        "  WHERE rank_best = 1 OR rank_worst = 1\r\n",
+        "),\r\n",
+        "mix AS (\r\n",
+        "  SELECT day_of_week,\r\n",
+        "         hour_uk,\r\n",
+        "         fuel_group,\r\n",
+        "         MEASURE(avg_share_pct) AS avg_share_pct\r\n",
+        "  FROM portfolio.uk_carbon_gold.metrics_generation_mix\r\n",
+        "  WHERE :region = 'All regions' OR region = :region\r\n",
+        "  GROUP BY day_of_week, hour_uk, fuel_group\r\n",
+        ")\r\n",
+        "SELECT concat(e.side, ': ', e.day_name, ' ', CAST(e.hour_uk AS STRING)) AS cell_label,\r\n",
+        "       e.side,\r\n",
+        "       m.fuel_group,\r\n",
+        "       m.avg_share_pct,\r\n",
+        "       e.avg_intensity\r\n",
+        "FROM extremes e\r\n",
+        "JOIN mix m\r\n",
+        "  ON  m.day_of_week = e.day_of_week\r\n",
+        "  AND m.hour_uk     = e.hour_uk\r\n",
+        "ORDER BY e.side, m.fuel_group"
+      ],
+      "parameters": [
+        {
+          "displayName": "region",
+          "keyword": "region",
+          "dataType": "STRING",
+          "defaultSelection": {
+            "values": {
+              "dataType": "STRING",
+              "values": [
+                {
+                  "value": "All regions"
+                }
+              ]
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "pages": [
+    {
+      "name": "db62d793",
+      "displayName": "Dashboard",
+      "layout": [
+        {
+          "widget": {
+            "name": "average-carbon-intensity-day-hour-london-time-all-data",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "1799d35f",
+                  "fields": [
+                    {
+                      "name": "sum(avg_intensity)",
+                      "expression": "SUM(`avg_intensity`)"
+                    },
+                    {
+                      "name": "hour_uk",
+                      "expression": "`hour_uk`"
+                    },
+                    {
+                      "name": "day_name",
+                      "expression": "`day_name`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "frame": {
+                "showTitle": true,
+                "title": {
+                  "value": "Average carbon intensity by day and hour (London time, all data)",
+                  "fields": []
+                }
+              },
+              "version": 3,
+              "widgetType": "heatmap",
+              "encodings": {
+                "x": {
+                  "fieldName": "hour_uk",
+                  "scale": {
+                    "type": "quantitative"
+                  }
+                },
+                "y": {
+                  "fieldName": "day_name",
+                  "scale": {
+                    "type": "categorical",
+                    "sort": {
+                      "by": "custom-order",
+                      "orderedValues": [
+                        "Mon",
+                        "Tue",
+                        "Wed",
+                        "Thu",
+                        "Fri",
+                        "Sat",
+                        "Sun"
+                      ]
+                    }
+                  }
+                },
+                "color": {
+                  "fieldName": "sum(avg_intensity)",
+                  "legend": {
+                    "title": "Average intensity (gCO2/kWh)"
+                  },
+                  "scale": {
+                    "type": "quantitative"
+                  }
+                }
+              },
+              "data": {
+                "queryName": "main_query"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 5,
+            "width": 12,
+            "height": 4
+          }
+        },
+        {
+          "widget": {
+            "name": "f7d940a9",
+            "queries": [
+              {
+                "name": "dashboards/01f1e77e19b21cca80fddd9303896a42/datasets/01f1e78074eb1a83883ebe90be6b1a57_region",
+                "query": {
+                  "datasetName": "e748ffef",
+                  "fields": [
+                    {
+                      "name": "region",
+                      "expression": "`region`"
+                    },
+                    {
+                      "name": "region_associativity",
+                      "expression": "COUNT_IF(`associative_filter_predicate_group`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "parameter_dashboards/01f1e77e19b21cca80fddd9303896a42/datasets/01f1e77e43d61f34ac990a1ab2819c22_region",
+                "query": {
+                  "datasetName": "1799d35f",
+                  "parameters": [
+                    {
+                      "name": "region",
+                      "keyword": "region"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "parameter_dashboards/01f1e77e19b21cca80fddd9303896a42/datasets/01f1e911a9b71beba41e671db1090630_region",
+                "query": {
+                  "datasetName": "be63a5e0",
+                  "parameters": [
+                    {
+                      "name": "region",
+                      "keyword": "region"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "parameter_dashboards/01f1e77e19b21cca80fddd9303896a42/datasets/01f1e91582ac1925bfd66ce3048638f6_region",
+                "query": {
+                  "datasetName": "30e0284d",
+                  "parameters": [
+                    {
+                      "name": "region",
+                      "keyword": "region"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "parameter_dashboards/01f1e77e19b21cca80fddd9303896a42/datasets/01f1ea8671d31d7e8097f8a23e0e115c_region",
+                "query": {
+                  "datasetName": "c100f93f",
+                  "parameters": [
+                    {
+                      "name": "region",
+                      "keyword": "region"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "frame": {
+                "showTitle": true
+              },
+              "widgetType": "filter-single-select",
+              "encodings": {
+                "fields": [
+                  {
+                    "fieldName": "region",
+                    "queryName": "dashboards/01f1e77e19b21cca80fddd9303896a42/datasets/01f1e78074eb1a83883ebe90be6b1a57_region"
+                  },
+                  {
+                    "parameterName": "region",
+                    "queryName": "parameter_dashboards/01f1e77e19b21cca80fddd9303896a42/datasets/01f1e77e43d61f34ac990a1ab2819c22_region"
+                  },
+                  {
+                    "parameterName": "region",
+                    "queryName": "parameter_dashboards/01f1e77e19b21cca80fddd9303896a42/datasets/01f1e911a9b71beba41e671db1090630_region"
+                  },
+                  {
+                    "parameterName": "region",
+                    "queryName": "parameter_dashboards/01f1e77e19b21cca80fddd9303896a42/datasets/01f1e91582ac1925bfd66ce3048638f6_region"
+                  },
+                  {
+                    "parameterName": "region",
+                    "queryName": "parameter_dashboards/01f1e77e19b21cca80fddd9303896a42/datasets/01f1ea8671d31d7e8097f8a23e0e115c_region"
+                  }
+                ]
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 4,
+            "height": 1
+          }
+        },
+        {
+          "widget": {
+            "name": "latest-half-hour",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "be63a5e0",
+                  "fields": [
+                    {
+                      "name": "sum(avg_intensity)",
+                      "expression": "SUM(`avg_intensity`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "frame": {
+                "showTitle": true,
+                "title": {
+                  "value": "Latest half hour (gCO2/kWh)",
+                  "fields": []
+                }
+              },
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "sum(avg_intensity)"
+                }
+              },
+              "data": {
+                "queryName": "main_query"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 1,
+            "width": 3,
+            "height": 4
+          }
+        },
+        {
+          "widget": {
+            "name": "446baa4e",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "be63a5e0",
+                  "fields": [
+                    {
+                      "name": "half_hour_london",
+                      "expression": "`half_hour_london`"
+                    },
+                    {
+                      "name": "regions_counted",
+                      "expression": "`regions_counted`"
+                    }
+                  ],
+                  "disaggregated": true,
+                  "orders": [
+                    {
+                      "direction": "DESC",
+                      "expression": "`regions_counted`"
+                    }
+                  ]
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "half_hour_london",
+                    "displayName": "Half hour (London)"
+                  },
+                  {
+                    "fieldName": "regions_counted",
+                    "displayName": "Regions",
+                    "formatTemplate": "{{ @formatted }}"
+                  }
+                ],
+                "rowOrder": [
+                  {
+                    "by": "column-reversed",
+                    "field": {
+                      "index": 1
+                    }
+                  }
+                ]
+              },
+              "data": {
+                "queryName": "main_query"
+              }
+            }
+          },
+          "position": {
+            "x": 3,
+            "y": 1,
+            "width": 4,
+            "height": 4
+          }
+        },
+        {
+          "widget": {
+            "name": "regions-by-intensity-class-latest-half-hour-1",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "30e0284d",
+                  "fields": [
+                    {
+                      "name": "intensity_index",
+                      "expression": "`intensity_index`"
+                    },
+                    {
+                      "name": "sum(regions)",
+                      "expression": "SUM(`regions`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "frame": {
+                "showTitle": true,
+                "title": {
+                  "value": "Regions by intensity class (latest half hour)",
+                  "fields": []
+                }
+              },
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "intensity_index",
+                  "axis": {
+                    "title": "Intensity class"
+                  },
+                  "scale": {
+                    "type": "categorical",
+                    "sort": {
+                      "by": "custom-order",
+                      "orderedValues": [
+                        "very low",
+                        "low",
+                        "moderate",
+                        "high",
+                        "very high"
+                      ]
+                    }
+                  }
+                },
+                "y": {
+                  "fieldName": "sum(regions)",
+                  "axis": {
+                    "title": "Regions"
+                  },
+                  "scale": {
+                    "type": "quantitative"
+                  }
+                },
+                "label": {
+                  "show": true
+                }
+              },
+              "data": {
+                "queryName": "main_query"
+              }
+            }
+          },
+          "position": {
+            "x": 7,
+            "y": 1,
+            "width": 5,
+            "height": 4
+          }
+        },
+        {
+          "widget": {
+            "name": "generation-mix-best-worst-hour",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "c100f93f",
+                  "fields": [
+                    {
+                      "name": "fuel_group",
+                      "expression": "`fuel_group`"
+                    },
+                    {
+                      "name": "cell_label",
+                      "expression": "`cell_label`"
+                    },
+                    {
+                      "name": "sum(avg_share_pct)",
+                      "expression": "SUM(`avg_share_pct`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "frame": {
+                "showTitle": true,
+                "title": {
+                  "value": "Generation mix in the best and worst hour",
+                  "fields": []
+                }
+              },
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "cell_label",
+                  "axis": {
+                    "hideTitle": true
+                  },
+                  "scale": {
+                    "type": "categorical"
+                  }
+                },
+                "y": {
+                  "fieldName": "sum(avg_share_pct)",
+                  "axis": {
+                    "title": "Average share (%)"
+                  },
+                  "scale": {
+                    "type": "quantitative"
+                  }
+                },
+                "color": {
+                  "fieldName": "fuel_group",
+                  "scale": {
+                    "type": "categorical"
+                  }
+                },
+                "label": {
+                  "show": true
+                }
+              },
+              "data": {
+                "queryName": "main_query"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 9,
+            "width": 12,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "e7294ee1",
+            "spec": {
+              "widgetType": "text",
+              "version": 1,
+              "encodings": {
+                "text": {
+                  "lines": [
+                    "<span style=\"font-size: 14px;\">Data: </span>[<span style=\"font-size: 14px;\">Carbon Intensity API</span>](https://carbonintensity.org.uk)<span style=\"font-size: 14px;\"> by National Energy System Operator (NESO), licensed under CC BY 4.0. All times are London time.</span>"
+                  ],
+                  "fields": []
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 15,
+            "width": 12,
+            "height": 1
+          }
+        }
+      ],
+      "pageType": "PAGE_TYPE_CANVAS",
+      "layoutVersion": "GRID_V1"
+    }
+  ],
+  "uiSettings": {
+    "theme": {
+      "widgetHeaderAlignment": "ALIGNMENT_UNSPECIFIED"
+    },
+    "applyModeEnabled": false
+  }
+}

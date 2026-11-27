@@ -36,6 +36,13 @@ dimensions:
   - name: hour_uk
     expr: hour_uk
     display_name: 'Hour (London)'
+  - name: half_hour_utc
+    expr: period_start_utc
+    comment: Start of the half hour in UTC, unique for each region. Use it to pick one half hour, because London clock time repeats one hour in October
+    display_name: 'Half hour start (UTC)'
+  - name: half_hour_uk
+    expr: period_start_uk
+    display_name: 'Half hour start (London)'
   - name: day_of_week
     expr: day_of_week_uk
     comment: ISO day of week, Monday 1 to Sunday 7, used to sort day_name
